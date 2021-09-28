@@ -1,0 +1,187 @@
+---
+title: "volcano"
+output: html_document
+---
+
+```{r}
+library(tidytuesdayR)
+library(tidyverse)
+library(tidymodels)
+library(scales)
+library(skimr)
+```
+
+```{r}
+tt <- tidytuesdayR::tt_load('2020-05-12')
+skim(tt$volcano)
+volcano <- tt$volcano
+volcano %>% count(primary_volcano_type, sort = TRUE)
+```
+
+```{r}
+#transmute lets you keep only the new columns you've created, and others you've listed. like a mutate and select in 1
+volcano_df<- volcano %>% 
+  transmute(volcano_type = case_when(str_detect(primary_volcano_type,
+                                                'Stratovolcano') ~ 'Stratovolcano',
+                                                str_detect(primary_volcano_type, 'Shield') ~ 'Shield',
+            TRUE~ 'Other'),
+            volcano_number, latitude, longitude, elevation,tectonic_settings, major_rock_1) %>% 
+  mutate_if(is.character, factor)
+
+```
+
+```{r}
+#build map of volcano eruptions
+world <- map_data("world")
+
+ggplot() +
+  geom_map(
+    data = world, map = world,
+    aes(long, lat, map_id = region),
+    color = "white", fill = "gray50", size = 0.05, alpha = 0.2
+  ) +
+  geom_point(
+    data = volcano_df,
+    aes(longitude, latitude, color = volcano_type),
+    alpha = 0.8
+  ) +
+  theme_void(base_family = "IBMPlexSans") +
+  labs(x = NULL, y = NULL, color = NULL)
+```
+
+```{r}
+#build model
+library(tidymodels)
+volcano_boot <- bootstraps(volcano_df)
+```
+
+```{r}
+#class imbalance
+library(themis)
+
+volcano_rec <- recipe(volcano_type~., data = volcano_df) %>% 
+  update_role(volcano_number, new_role = 'Id') %>% 
+  #step_other collapses variables that aren't as frequent into 'Other'
+  step_other(tectonic_settings) %>% 
+  step_other(major_rock_1) %>% 
+  step_dummy(tectonic_settings, major_rock_1) %>% 
+  step_zv(all_predictors()) %>% 
+  step_normalize(all_predictors()) %>% 
+  #oversample the minority class
+  step_smote(volcano_type)
+
+volcano_prep <- prep(volcano_rec)
+juice(volcano_prep)
+```
+
+```{r}
+#model specification
+rf_spec <- rand_forest(trees = 1000) %>% 
+  set_engine('ranger') %>% 
+  set_mode('classification')
+
+
+volcano_workflow <- workflow() %>% 
+  add_recipe(volcano_rec) %>% 
+  add_model(rf_spec)
+```
+
+```{r}
+#fit model
+#for every individual bootstrap sample :
+#the recipe is looked at, then evaluated
+#look at the model, then model is evaluated
+#then predictions are made on the part from the bootstrap that was not used to fit the model
+volcano_res <- fit_resamples(
+  volcano_workflow,
+  resamples = volcano_boot,
+  control = control_resamples(save_pred = TRUE)
+)
+```
+
+```{r}
+#evaluate
+volcano_res %>% 
+  collect_metrics()
+```
+
+```{r}
+#probabilities of each predicted class
+volcano_res %>% 
+  collect_predictions()
+
+#confusion matrix
+volcano_res %>% 
+  collect_predictions() %>% 
+  conf_mat(volcano_type, .pred_class)
+
+#ppvis defined as the percent of predicted positives that are actually positive 
+#while the negative predictive value (npv()) is defined as the percent of negative positives that are actually negative.
+volcano_res %>%
+  collect_predictions() %>%
+  group_by(id) %>%
+  ppv(volcano_type, .pred_class)
+```
+
+
+```{r}
+#feature importance
+library(vip)
+rf_spec %>% 
+  set_engine('ranger',importance= 'permutation') %>% 
+  fit(
+    volcano_type~., 
+    #don't use the bootstrapped samples, but the actual dataset
+    #juice the prepped recipe
+    #remove the ID number
+     data = juice(volcano_prep) %>%
+      select(-volcano_number) %>%
+      janitor::clean_names()
+  ) %>%
+  vip(geom = "point")
+  
+```
+
+
+```{r}
+#join predictions to original dataset
+volcano_pred <- volcano_res %>%
+  collect_predictions() %>%
+  mutate(correct = volcano_type == .pred_class) %>%
+  left_join(volcano_df %>%
+    mutate(.row = row_number()))
+
+volcano_pred
+```
+
+```{r}
+#plot by correctly predicted
+ggplot() +
+  geom_map(
+    data = world, map = world,
+    aes(long, lat, map_id = region),
+    color = "white", fill = "gray90", size = 0.05, alpha = 0.5
+  ) +
+  stat_summary_hex(
+    data = volcano_pred,
+    aes(longitude, latitude, z = as.integer(correct)),
+    fun = "mean",
+    alpha = 0.7, bins = 50
+  ) +
+  scale_fill_gradient(high = "cyan3", labels = scales::percent) +
+  theme_void(base_family = "IBMPlexSans") +
+  labs(x = NULL, y = NULL, fill = "Percent classified\ncorrectly")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

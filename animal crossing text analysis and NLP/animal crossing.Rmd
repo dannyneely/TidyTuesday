@@ -1,0 +1,357 @@
+
+```{r}
+library(tidyverse)
+library(tidytuesdayR)
+library(tidytext)
+library(lubridate)
+theme_set(theme_light())
+
+tt <- tidytuesdayR::tt_load("2020-05-05")
+
+critic <- tt$critic
+items <- tt$items
+critic <- readr::read_tsv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-05-05/critic.tsv')
+user_reviews <- readr::read_tsv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-05-05/user_reviews.tsv')
+villagers <- tt$villagers
+
+```
+
+
+```{r}
+#histogram of reviews
+user_reviews %>%
+  ggplot(aes(grade)) +
+  geom_histogram() +
+  labs(title = "Most reviews were very low or very high")
+
+
+```
+
+```{r}
+#get the reviews for every week, as well as the percentage of reviews that were rated 0 and rated 10
+by_week <- user_reviews %>%
+  group_by(week = floor_date(date, "week", week_start = 1)) %>%
+  summarize(nb_reviews = n(),
+            avg_grade = mean(grade),
+            pct_zero = mean(grade == 0),
+            pct_ten = mean(grade == 10))
+
+#plot average rating over time, and number of reviews as size
+by_week %>%
+  ggplot(aes(week, avg_grade)) +
+  geom_line() +
+  geom_point(aes(size = nb_reviews)) +
+  expand_limits(y = 0) +
+  labs(x = "Time",
+       y = "Average grade",
+       size = "# of reviews")
+
+
+
+#show the proportion of 0 and 10 scores per each week
+by_week %>%
+  gather(type, value, contains("pct")) %>%
+  mutate(type = ifelse(type == "pct_zero", "% rated 0", "% rated 10")) %>%
+  ggplot(aes(week, value, color = type)) +
+  geom_line() +
+  geom_point(aes(size = nb_reviews)) +
+  scale_y_continuous(labels = scales::percent) +
+  expand_limits(y = 0) +
+  labs(x = "Time",
+       y = "% of reviews",
+       size = "Total reviews in week",
+       title = "Reviews got more polarizing in middle of game")
+```
+
+
+```{r}
+
+
+user_review_words <- user_reviews %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words, by = "word") %>%
+  count(user_name, date, grade, word)
+
+#find what words were associated with what grade
+#word must be used in at least 25 reviews
+by_word <- user_review_words %>%
+  group_by(word) %>%
+  summarize(avg_grade = mean(grade),
+            nb_reviews = n()) %>%
+  arrange(desc(nb_reviews)) %>%
+  filter(nb_reviews >= 25) %>%
+  arrange(desc(avg_grade))
+
+#plot average grade over number of reviews, with each word showing how it affected the review score
+by_word %>%
+  filter(nb_reviews >= 75) %>%
+  ggplot(aes(nb_reviews, avg_grade)) +
+  geom_point() +
+  geom_text(aes(label = word), vjust = 1, hjust = 1, check_overlap = TRUE) +
+  scale_x_log10()
+
+#words associated with low scoring ratings
+by_word %>%
+  top_n(20, -avg_grade) %>%
+  ggplot(aes(nb_reviews, avg_grade)) +
+  geom_point() +
+  geom_text(aes(label = word), vjust = 1, hjust = 1, check_overlap = TRUE) +
+  scale_x_log10() +
+  labs(title = "What words were associated with low-grade reviews?",
+       subtitle = "20 most negative words; only words in at least 25 reviews")
+```
+
+```{r}
+#topic modelling creates clusters of what people are talking about
+library(widyr)
+library(stm)
+
+review_matrix <- user_review_words %>% 
+  group_by(word) %>% 
+  filter(n()>= 25) %>% 
+  #create word topic matrix, how many times did each user use a particular word
+  #one row for each username, one column for each word, then n for number of appearances
+  cast_sparse(user_name, word, n) 
+
+#create the topic model 
+topic_model <- stm(review_matrix, K = 4, verbose = FALSE, init.type = "Spectral")
+
+topic_model
+```
+
+```{r}
+#extract
+#shows how rare/frequent the word is within each of the 4 topics.
+#beta shows percentage of apperance in each topic
+tidy(topic_model)
+
+#plot the top 6 words for each topic
+#unsupervised way to cluster topics
+tidy(topic_model) %>% 
+  group_by(topic) %>% 
+  top_n(12, beta) %>% 
+  mutate(term = reorder_within(term, beta, topic)) %>% 
+  ggplot(aes(beta, term)) +
+  geom_col()+
+  scale_y_reordered()+
+  facet_wrap(~topic, scales = 'free_y')
+```
+
+```{r}
+#how much is each document associated with a partcular username?
+topic_model_gamma <- tidy(topic_model, matrix = 'gamma') %>% 
+  mutate(user_name = rownames(review_matrix)[document]) %>% 
+  inner_join(user_reviews, by = "user_name")
+
+
+#which documents fell into which topics
+topic_model_gamma %>% 
+  group_by(topic) %>% 
+  top_n(1,gamma)
+
+
+topic_model_gamma %>%
+  group_by(topic) %>%
+  summarize(correlation = cor(gamma, grade),
+            spearman_correlation = cor(gamma, grade, method = "spearman"))
+
+#over time, do some topics become more frequent than others?
+topic_model_gamma %>%
+  group_by(week = floor_date(date, "week", week_start = 1),
+           topic) %>%
+  summarize(avg_gamma = mean(gamma)) %>%
+  ggplot(aes(week, avg_gamma, color = factor(topic))) +
+  geom_line() +
+  expand_limits(y = 0) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Time",
+       y = "Average gamma (document-topic association)")
+```
+
+```{r}
+#modelling with tidymodels and NLP
+library(irlba)
+#pca
+sparse_df <- user_reviews %>% 
+  select(grade, text) %>% 
+  unnest_tokens("word","text") %>% 
+  count(grade, word) %>% 
+  anti_join(stop_words, by = "word") %>% 
+  filter(n >=5) %>% 
+  cast_sparse(grade, word, n)
+
+#pca plot
+pca_text <- prcomp_irlba(sparse_df, n = 4, scale. = T)
+pca_text$center %>% 
+  tidy() %>% 
+  select(names) %>% 
+  cbind(pca_text$rotation) %>% 
+  ggplot(aes(x = PC1, y = PC2, label = names)) + 
+  geom_point() + 
+  geom_text()
+
+```
+
+```{r}
+#tf-idf
+
+user_reviews %>% 
+  unnest_tokens("word", "text") %>% 
+  count(grade, word) %>% 
+  anti_join(stop_words) %>% 
+  filter(n >= 5) %>% 
+  bind_tf_idf(word, grade, n) %>% 
+  group_by(grade) %>% 
+  top_n(tf_idf, n =5) %>% 
+  ungroup() %>% 
+  mutate(grade = as.factor(grade)) %>% 
+  ggplot(aes(x = reorder_within(word, tf_idf, grade), y = tf_idf, fill = grade)) + 
+  geom_col() + 
+  scale_x_reordered() + 
+  coord_flip() + 
+  facet_wrap(~grade, scales = "free") + 
+  theme(legend.position = 'none')
+
+```
+
+```{r}
+#weighted log odds
+library(tidylo)
+user_reviews %>% 
+  unnest_tokens("word", "text") %>% 
+  count(grade, word) %>% 
+  anti_join(stop_words) %>% 
+  filter(n >= 5) %>% 
+  bind_log_odds(grade, word, n) %>% 
+  group_by(grade) %>% 
+  top_n(log_odds_weighted, n =5) %>% 
+  ungroup() %>% 
+  mutate(grade = as.factor(grade)) %>% 
+  ggplot(aes(x = reorder_within(word, log_odds_weighted, grade), y = log_odds_weighted, fill = grade)) + 
+  geom_col() + 
+  scale_x_reordered() + 
+  coord_flip() + 
+  facet_wrap(~grade, scales = "free") + 
+  theme(legend.position = 'none')
+
+```
+
+```{r}
+#text recipes and tidymodels
+library(textrecipes)
+library(tidymodels)
+
+#split
+tidy_data <- user_reviews %>% select(-user_name)
+tidy_split <- initial_split(tidy_data)
+tidy_train <- training(tidy_split)
+tidy_test <- testing(tidy_split)
+tidy_split$in_id
+
+#cv folds
+cross_validation <- vfold_cv(tidy_train, v = 10)
+
+```
+
+```{r}
+#recipe
+
+text_recipe <- recipe(grade~text, data = tidy_train) %>% 
+  step_tokenize(text) %>% 
+  step_stopwords(text) %>% 
+  step_tokenfilter(text, max_tokens = 500) %>% 
+  step_tf(text)
+text_prep <- text_recipe %>% prep()
+
+
+wf <- workflow() %>% 
+  add_recipe(text_recipe)
+```
+
+```{r}
+#lasso model. 
+#don't want to remove interaction effect entirely. just minimize it with mixture = 1
+lasso_model <- linear_reg(penalty = tune(), mixture = 1) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet")
+
+#grid search for penalty value
+lasso_grid <- grid_regular(penalty(), levels = 10)
+
+
+#have tuned model
+lasso_tune <- tune_grid(
+  wf %>% add_model(lasso_model),
+  resamples = cross_validation,
+  grid = lasso_grid
+)
+
+#plot metrics
+lasso_tune %>% 
+  collect_metrics() %>% 
+  ggplot(aes(x = penalty, y = mean)) + geom_line() + facet_wrap(~.metric, scales = "free")
+
+#select best penalty value
+lasso_best_tune <- lasso_tune %>% select_best("rmse")
+  
+#create the final model
+final_lasso_model <- finalize_model(lasso_model, lasso_best_tune)  
+
+#add the original recipe and the finalized model to the new workflow
+lasso_wf <- workflow() %>% 
+  add_recipe(text_recipe) %>% 
+  add_model(final_lasso_model)
+
+lasso_eval <- lasso_wf %>% last_fit(tidy_split)
+lasso_eval %>% collect_metrics()
+
+```
+
+```{r}
+#random forest 
+
+#create spec
+random_forest_model <- rand_forest(mtry = 25,
+                                   trees = 1000,
+                                   min_n = 20) %>% 
+  set_mode("regression") %>% 
+  set_engine("ranger")
+
+#if we were to tune
+random_forest_tune <- fit_resamples(
+  random_forest_model,
+  text_recipe,
+  cross_validation
+)
+
+
+random_forest_tune %>% 
+  collect_metrics()
+
+
+final_rf_wf <- workflow() %>% 
+  add_recipe(text_recipe) %>% 
+  add_model(random_forest_model) 
+
+
+final_rf_eval <- final_rf_wf %>% last_fit(tidy_split)
+
+
+#RF has better performance than lasso 
+final_rf_eval %>% collect_metrics() %>% mutate(model = "rf") %>% 
+  rbind(lasso_eval %>% collect_metrics() %>% mutate(model = "lasso")) %>% 
+  ggplot(aes(x = model, y = .estimate, fill = model)) + geom_col() + facet_wrap(~.metric, scales = "free")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
