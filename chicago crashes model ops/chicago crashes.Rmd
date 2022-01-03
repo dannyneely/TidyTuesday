@@ -1,0 +1,211 @@
+```{r}
+library(tidyverse)
+library(tidytuesdayR) 
+library(RSocrata)
+
+
+years_ago <- 
+crash_url <- glue::glue("https://data.cityofchicago.org/Transportation/Traffic-Crashes-Crashes/85ca-t3if?$where=CRASH_DATE > '2019-11-01'")
+crash_raw <- as_tibble(read.socrata(crash_url))
+
+```
+
+```{r}
+#outcome variable is injury. if there is a value greater than 0, then injury. if not, no injury
+crash <- crash_raw %>%
+  arrange(desc(crash_date)) %>%
+  transmute(
+    injuries = if_else(injuries_total > 0, "injuries", "none"),
+    crash_date,
+    crash_hour,
+    report_type = if_else(report_type == "", "UNKNOWN", report_type),
+    num_units,
+    posted_speed_limit,
+    weather_condition,
+    lighting_condition,
+    roadway_surface_cond,
+    first_crash_type,
+    trafficway_type,
+    prim_contributory_cause,
+    latitude, longitude
+  ) %>%
+  na.omit()
+```
+
+```{r}
+#observe crash frequency over time
+#filter out non full weeks
+crash %>% 
+  mutate(crash_date = floor_date(crash_date, unit = "week")) %>% 
+  count(crash_date, injuries) %>% 
+  filter(crash_date != last(crash_date),
+         crash_date != first(crash_date)) %>% 
+  ggplot(aes(x = crash_date, y = n, color = injuries))+
+  geom_line()+
+  scale_y_continuous(limits = c(0, NA))
+```
+
+```{r}
+#injury rate over time
+crash %>%
+  mutate(crash_date = floor_date(crash_date, unit = "week")) %>%
+  count(crash_date, injuries) %>%
+  filter(
+    crash_date != last(crash_date),
+    crash_date != first(crash_date)
+  ) %>%
+  group_by(crash_date) %>%
+  mutate(percent_injury = n / sum(n)) %>%
+  ungroup() %>%
+  filter(injuries == "injuries") %>%
+  ggplot(aes(crash_date, percent_injury)) +
+  geom_line(size = 1.5, alpha = 0.7, color = "midnightblue") +
+  scale_y_continuous(limits = c(0, NA), labels = percent_format()) +
+  labs(x = NULL, y = "% of crashes that involve injuries")
+```
+
+```{r}
+#crashes over day of the week
+crash %>% 
+  mutate(crash_date = wday(crash_date, label = T)) %>% 
+  count(injuries, crash_date) %>% 
+  group_by(injuries) %>% 
+  mutate(percent = n / sum(n)) %>% 
+  ungroup() %>% 
+  ggplot(aes(percent,crash_date, fill = injuries))+
+  geom_col(position = "dodge")
+```
+
+```{r}
+#injury counts with first crash type
+
+crash %>% 
+      count(injuries, first_crash_type) %>% 
+  mutate( first_crash_type = fct_reorder(first_crash_type,n)) %>% 
+  group_by(injuries) %>% 
+  mutate(percent = n / sum(n)) %>% 
+  ungroup() %>% 
+  group_by(first_crash_type) %>% 
+  filter(sum(n) > 1e4) %>% 
+  ungroup() %>% 
+  ggplot(aes(percent,first_crash_type, fill = injuries))+
+  geom_col(position = "dodge")
+```
+
+```{r}
+#map of injuries
+crash %>%
+  filter(latitude > 0) %>%
+  ggplot(aes(longitude, latitude, color = injuries)) +
+  geom_point(size = 0.5, alpha = 0.4) +
+  labs(color = NULL) +
+  scale_color_manual(values = c("deeppink4", "gray80")) +
+  coord_fixed()
+```
+
+model time
+
+```{r}
+library(tidymodels) 
+set.seed(4312)
+
+crash_split <- initial_split(crash, strata = injuries)
+crash_train <- training(crash_split)
+crash_test <- testing(crash_split)
+
+#injuries is a minority class, so with class imbalance good idea to use stratification
+crash_folds <- vfold_cv(crash_train, strata = injuries)
+#within each resampling fold 140k rows for training, and 15k rows for assessment
+```
+
+```{r}
+#bagged tree model is a much smaller model size (the object that we would need to predict from) than other models like xgboost or RF. therefore, way faster to train. as good performance for much faster prediction. smaller deployment size.
+library(baguette)
+library(themis)
+#preprocessing using recipe
+crash_rec <- recipe(injuries~., data = crash_train) %>% 
+  step_date(crash_date) %>%  #creates day of week, month, and year features
+  step_rm(crash_date) %>% 
+  step_other(first_crash_type, weather_condition, trafficway_type,prim_contributory_cause,
+             other = "OTHER") %>% 
+  step_downsample(injuries)
+
+#model
+bag_spec <- bag_tree(min_n = 10) %>% 
+  set_engine("rpart", times = 25) %>% 
+  set_mode("classification")
+
+#workflow
+crash_wflow <- workflow() %>% 
+  add_model(bag_spec) %>% 
+  add_recipe(crash_rec) 
+
+```
+
+```{r}
+doParallel::registerDoParallel()
+set.seed(321)
+
+#train model
+crash_res <- fit_resamples(
+  crash_wflow,
+  crash_folds
+)
+
+#evaluate model
+collect_metrics(crash_res)
+
+```
+
+```{r}
+#fit on whole training set, evaluate on test
+crash_final <- last_fit(crash_wflow, crash_split)
+
+collect_metrics(crash_final)
+
+#automatically get variable importance scores from bagged tree models
+crash_imp <- crash_final$.workflow[[1]] %>% 
+  pull_workflow_fit()
+
+#plot term importance
+crash_imp$fit$imp %>% 
+  slice_max(value, n = 10) %>% 
+  ggplot(aes(value, fct_reorder(term, value)))+
+  geom_col()
+
+
+```
+
+```{r}
+#roc curve
+collect_predictions(crash_final) %>% 
+  roc_curve(injuries, .pred_injuries) %>% 
+  autoplot()
+
+```
+
+
+```{r}
+#save model. butcher is like pickle. make the model as small as possible
+crash_model <- butcher::butcher(crash_final$.workflow[[1]])
+
+#predict with butcher model
+predict(crash_model, crash_test[222, ])
+
+#save model
+saveRDS(crash_wf_model, here::here("crash-api", "crash-wf-model.rds"))
+collect_metrics(crash_res) %>%
+  write_csv(here::here("crash-api", "crash-model-metrics.csv"))
+```
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,85 @@
+```{r}
+#use statistical modelling to measure the country to country differences between crop yields
+library(tidyverse)
+key_crop_yields <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-09-01/key_crop_yields.csv")
+land_use <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-09-01/land_use_vs_yield_change_in_cereal_production.csv")
+```
+
+```{r}
+top_countries <- land_use %>% 
+  janitor::clean_names() %>% 
+  filter(!is.na(code),
+         entity != "World") %>% 
+  group_by(entity) %>% 
+  filter(year == max(year)) %>% 
+    ungroup() %>% 
+  slice_max(total_population_gapminder, n = 30) %>% 
+  pull(entity)
+```
+
+```{r}
+#reshape, only take 4 crops
+tidy_yields <- key_crop_yields %>% 
+  janitor::clean_names() %>% 
+    pivot_longer(wheat_tonnes_per_hectare:bananas_tonnes_per_hectare,
+    names_to = "crop", values_to = "yield"
+  ) %>%
+  mutate(crop = str_remove(crop, "_tonnes_per_hectare")) %>%
+  filter(
+    crop %in% c("wheat", "rice", "maize", "barley"),
+    entity %in% top_countries,
+    !is.na(yield)
+  )
+```
+
+```{r}
+#plot each top 30 country wheat/rice/maize/barley
+tidy_yields %>% 
+  ggplot(aes(year, yield, color = crop))+
+  geom_line(alpha = 0.7, size = 1.5)+
+  facet_wrap(~ entity)
+```
+
+```{r}
+#make many linear models by nesting and mapping
+library(tidymodels)
+
+#make the models
+tidy_lm <- tidy_yields %>% 
+  nest(yields = c(year, yield)) %>%
+  mutate(model = map(yields, ~ lm(yield ~ year, data = .x)))
+
+
+#now get coefficients from each model
+slopes <- tidy_lm %>% 
+  mutate(coefs = map(model, tidy)) %>% 
+  unnest(coefs) %>% 
+  filter(term == "year") %>% 
+  mutate(p.value = p.adjust(p.value))
+```
+
+```{r}
+library(ggrepel)
+#everything on the positive side above 0 is something that is increasing, everything negative is decreasing
+#the lower the p valuie the more likely we aren't seeing a vlue as extreme due to chance
+
+#On the x-axis is the slope of these models. Notice that most countries are on the positive side, with increasing crop yields. The further to the right a country is, the larger the increase in crop yield over this time period. Corn yields have increased the most.
+
+#On the y-axis is the p-value, a measure of how surprising the effect we see is under the assumption of no relationship (no change with time). Countries lower in the plots have smaller p-values; we are more certain those are real relationships.
+
+
+slopes %>% 
+  ggplot(aes(estimate, p.value, label = entity))+
+  geom_point(aes(color = crop),alpha = 0.8, size = 2.5,
+             show.legend = F)+
+  geom_vline(xintercept = 0)+
+  geom_text_repel()+
+  scale_y_log10()+
+  facet_wrap(~crop)
+```
+
+
+
+
+
+

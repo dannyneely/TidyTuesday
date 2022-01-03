@@ -1,0 +1,96 @@
+```{r}
+library(tidytuesdayR)
+tt <- tt_load("2021-04-27")
+departures <- tt$departures
+head(departures)
+
+```
+
+```{r}
+departures %>% 
+  filter(departure_code < 9,
+         fyear > 1995, fyear < 2019) %>% 
+  mutate(involuntary = if_else(departure_code %in% 3:4, "involuntary", "other" )) %>% 
+  count(fyear, involuntary) %>% 
+  ggplot(aes(fyear,n, color = involuntary))+
+  geom_line()+
+  geom_point()+
+  geom_smooth(method = "lm")+
+  scale_y_continuous(limits = c(0,NA))
+
+```
+
+
+```{r}
+#model df
+departures_df <- departures %>% 
+  filter(departure_code < 9,
+         fyear > 1995, fyear < 2019) %>% 
+  mutate(involuntary = if_else(departure_code %in% 3:4, "involuntary", "other" ))
+
+```
+
+```{r}
+library(broom)
+#build a basic model
+df <- departures_df %>% 
+  count(fyear, involuntary) %>% 
+  pivot_wider(names_from = involuntary, values_from = n)
+
+#binomial generalized linear model where successes are involuntary and failure is other
+
+mod <- glm(cbind(involuntary, other)~ fyear, data = df, family = "binomial")
+
+summary(mod)
+#return from log scale to linear
+tidy(mod, exponentiate = T)
+```
+
+```{r}
+#boostrapping with tidymodels
+
+library(rsample)
+set.seed(123)
+ceo_folds <- bootstraps(departures_df, times = 1000 )
+ceo_folds
+```
+
+```{r}
+#make function to count departures by year and type, fit model, and return coefficients
+fit_binom <- function(split) {
+  df <- analysis(split) %>%
+    count(fyear, involuntary) %>%
+    pivot_wider(names_from = involuntary, values_from = n)
+
+  mod <- glm(cbind(involuntary, other) ~ fyear, data = df, family = "binomial")
+  tidy(mod, exponentiate = TRUE)
+}
+
+#apply function to all bootstrap resamples
+boot_models <- ceo_folds %>% mutate(coef_info = map(splits, fit_binom))
+boot_models
+```
+
+```{r}
+#evaluate
+percentile_intervals <- int_pctl(boot_models, coef_info)
+percentile_intervals
+
+boot_models %>%
+  unnest(coef_info) %>%
+  filter(term == "fyear") %>%
+  ggplot(aes(estimate)) +
+  geom_vline(xintercept = 1, lty = 2, color = "gray50", size = 2) +
+  geom_histogram() +
+  labs(
+    x = "Annual increase in involuntary CEO departures",
+    title = "Over this time period, CEO departures are increasingly involuntary",
+    subtitle = "Each passing year corresponds to a departure being 1-2% more likely to be involuntary"
+  )
+```
+
+
+
+
+
+

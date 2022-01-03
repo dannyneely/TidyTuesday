@@ -1,0 +1,148 @@
+```{r}
+#based on characteristics of the world record, did the racer use a shortcut or not
+library(tidytuesdayR)
+
+tt <- tt_load("2021-05-25")
+
+records <- tt$records
+head(records)
+```
+
+```{r}
+#observe shortcut/laps over time
+records %>% 
+  ggplot(aes(date,time, color = track))+
+  geom_point(alpha=  0.7, show.legend = F)+
+  facet_grid(rows = vars(type), cols = vars(shortcut), scales = "free_y")
+```
+
+```{r}
+#model
+library(tidymodels)
+
+set.seed(123)
+mario_split <- records %>% 
+  select(shortcut, track, date, time) %>% 
+  mutate_if(is.character, factor) %>% 
+  initial_split(strata = shortcut)
+
+mario_train <- training(mario_split)
+mario_test <- testing(mario_split)
+
+mario_folds <- bootstraps(mario_train, strata = shortcut)
+
+```
+
+```{r}
+#decision tree spec
+tree_spec <- decision_tree(cost_complexity = tune(), tree_depth = tune()) %>% 
+  set_engine("rpart") %>% 
+  set_mode("classification")
+
+#create grid for tuning
+tree_grid <- grid_regular(
+  cost_complexity(),
+  tree_depth(),
+  levels = 7
+)
+
+#decision tree models are low maintenance when it comes to preprocessing
+tree_wflow <- workflow() %>% 
+  add_model(tree_spec) %>% 
+  add_formula(shortcut~.)
+
+
+```
+
+```{r}
+doParallel::registerDoParallel()
+set.seed(123)
+
+tree_res <- tune_grid(
+  tree_wflow,
+  grid = tree_grid,
+  resamples = mario_folds,
+  control = control_resamples(save_pred = T)
+)
+```
+
+```{r}
+#choose best hyperparameters from tuning for final model
+collect_metrics(tree_res)
+show_best(tree_res, "roc_auc")
+autoplot(tree_res)
+
+#plot roc_auc curve
+collect_predictions(tree_res) %>% 
+  group_by(id) %>% 
+  roc_curve(shortcut, .pred_No) %>% 
+  autoplot()
+
+```
+
+```{r}
+#choose the hypers
+choose_tree <- select_best(tree_res, metric = "accuracy")
+
+#finalize the workflow with the best hypers
+#then fit to all data
+final_res <- tree_wflow %>% 
+  finalize_workflow(choose_tree) %>% 
+  last_fit(mario_split)
+
+#look at final metrics from testing data
+#single decision trees are prone to overfitting
+collect_metrics(final_res)
+```
+
+```{r}
+#final result has a fitted workflow to save and fit on it, so new data can be predicted on it
+#save with .rds
+final_fitted <- final_res$.workflow[[1]]
+predict(final_fitted, mario_test[10:12,])
+```
+
+```{r}
+#explanability with decision trees is great
+#partial dependence plot to show shortcut and time for record
+library(DALEXtra)
+
+#first you create an explainer and then you use that explainer for the task you want, like computing a PDP or Shapley explanations.
+mario_explainer <- explain_tidymodels(
+  final_fitted,
+  data = dplyr::select(records, -shortcut),
+  y = as.integer(records$shortcut),
+  verbose = FALSE
+)
+
+#Then let’s compute a partial dependence profile for time, grouped by type, which is three laps vs. one lap.
+pdp_time <- model_profile(
+  mario_explainer,
+  variables = "time",
+  N = NULL,
+  groups = "type"
+)
+
+#You can use the default plotting from DALEX by calling plot(pdp_time), but if you like to customize your plots, you can access the underlying data via pdp_time$agr_profiles and pdp_time$cp_profiles.
+
+as_tibble(pdp_time$agr_profiles) %>%
+  mutate(`_label_` = str_remove(`_label_`, "workflow_")) %>%
+  ggplot(aes(`_x_`, `_yhat_`, color = `_label_`)) +
+  geom_line(size = 1.2, alpha = 0.8) +
+  labs(
+    x = "Time to complete track",
+    y = "Predicted probability of shortcut",
+    color = NULL,
+    title = "Partial dependence plot for Mario Kart world records",
+    subtitle = "Predictions from a decision tree model"
+  )
+```
+
+
+
+
+
+
+
+
+

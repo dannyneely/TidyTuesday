@@ -1,0 +1,161 @@
+```{r}
+#this is from sliced and the evaluation metric was root mean squared log error
+library(tidyverse)
+
+train_raw <- read_csv("tidytuesday/predict airbnb prices create own metrics/train.csv")
+head(train_raw)
+
+```
+
+```{r}
+#all boroughs plotted on top of each other
+train_raw %>% 
+  ggplot(aes(price, fill  = neighbourhood_group))+
+  geom_histogram(position = "identity", alpha = 0.5, bins = 20)+
+  scale_x_log10(labels = scales::dollar_format())
+```
+
+
+```{r}
+#map
+train_raw %>%
+  ggplot(aes(longitude, latitude, color = log(price))) +
+  geom_point(alpha = 0.2) +
+  scale_color_viridis_c()
+
+
+train_raw %>%
+  ggplot(aes(longitude, latitude, z = log(price))) +
+  stat_summary_hex(alpha = 0.8, bins = 70) +
+  scale_fill_viridis_c() +
+  labs(fill = "Mean price (log)")
+```
+
+```{r}
+#model
+library(tidymodels)
+set.seed(123)
+nyc_split <- train_raw %>% 
+  mutate(price = log(price + 1 )) %>%  #must add 1 because of 0s in price
+  initial_split(strata = price) 
+
+nyc_train <- training(nyc_split)
+nyc_test <- testing(nyc_split)
+
+set.seed(321)
+nyc_folds <- vfold_cv(nyc_train, v = 5, strata = price)
+
+```
+
+```{r}
+#recipe to handle the airbnb descriptions text
+library(textrecipes)
+nyc_rec <-
+  recipe(price ~ latitude + longitude + neighbourhood + room_type +
+    minimum_nights + number_of_reviews + availability_365 + name,
+  data = nyc_train
+  ) %>%
+  step_novel(neighbourhood) %>%
+  step_other(neighbourhood, threshold = 0.01) %>%
+  step_tokenize(name) %>%
+  step_stopwords(name) %>%
+  step_tokenfilter(name, max_tokens = 30) %>%
+  step_tf(name)
+```
+
+```{r}
+#simple bag tree model, good starting spot
+library(baguette)
+
+bag_spec <- bag_tree(min_n = 10) %>% 
+  set_engine("rpart", times = 25) %>% 
+  set_mode("regression")
+
+bag_wflow <- 
+  workflow() %>% 
+  add_model(bag_spec) %>% 
+  add_recipe(nyc_rec)
+
+bag_fit <- fit(bag_wflow, data = nyc_train)
+```
+
+```{r}
+#fit with resampling and default metrics
+doParallel::registerDoParallel()
+
+set.seed(123)
+bag_rs <- fit_resamples(bag_wflow, nyc_folds)
+collect_metrics(bag_rs)
+```
+
+```{r}
+#augment lets you add prediction to each original row
+#price and .pred are on log scale
+test_res <- augment(bag_fit,nyc_test)
+
+test_res %>%
+  ggplot(aes(exp(price), exp(.pred), color = neighbourhood_group)) +
+  geom_abline(slope = 1, lty = 2, color = "gray50", alpha = 0.5) +
+  geom_point(alpha = 0.2) +
+  scale_x_log10(labels = scales::dollar_format()) +
+  scale_y_log10(labels = scales::dollar_format()) +
+  labs(color = NULL, x = "True price", y = "Predicted price")
+```
+
+```{r}
+#make your own custom metric
+library(rlang)
+
+rmsle_vec <- function(truth, estimate, na_rm = TRUE, ...) {
+  rmsle_impl <- function(truth, estimate) {
+    sqrt(mean((log(truth + 1) - log(estimate + 1))^2))
+  }
+
+  metric_vec_template(
+    metric_impl = rmsle_impl,
+    truth = truth,
+    estimate = estimate,
+    na_rm = na_rm,
+    cls = "numeric",
+    ...
+  )
+}
+
+rmsle <- function(data, ...) {
+  UseMethod("rmsle")
+}
+rmsle <- new_numeric_metric(rmsle, direction = "minimize")
+
+rmsle.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
+  metric_summarizer(
+    metric_nm = "rmsle",
+    metric_fn = rmsle_vec,
+    data = data,
+    truth = !!enquo(truth),
+    estimate = !!enquo(estimate),
+    na_rm = na_rm,
+    ...
+  )
+}
+```
+
+```{r}
+#now we can use function for the custom metric and compare it to rmse
+test_res %>%
+  rmse(price, .pred)
+
+
+test_res %>%
+  mutate(across(c(price, .pred), exp)) %>%
+  rmsle(price, .pred)
+```
+
+
+
+
+
+
+
+
+
+

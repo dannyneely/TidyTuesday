@@ -1,0 +1,117 @@
+```{r}
+library(timetk)
+library(modeltime)
+library(tidyverse)
+library(tidymodels)
+library(lubridate)
+df <- timetk::bike_sharing_daily
+head(df)
+```
+
+```{r}
+df <- df %>% 
+  select(date = dteday, cnt)
+
+#non stationary, might need to do differencing
+df %>% 
+  ggplot(aes(date, cnt))+
+  geom_line()
+```
+
+```{r}
+#daily forecasting, getting daily change
+#made stationary
+df <- df %>% 
+  mutate(daily_change = cnt - lag(cnt, n = 1)) %>% 
+  na.omit() %>% 
+  arrange(date)
+
+
+  df %>% 
+    ggplot(aes(date, daily_change)) +
+    geom_line()
+  
+#For ARIMA models, the stationary assumption is required so differencing is used but for Prophet, differencing is not required.  I found in my own work that differencing made the performance worse for Prophet models so I would avoid differencing and focus on changepoints.
+```
+
+```{r}
+#test set never sees train set
+train_data <- training(initial_time_split(df, prop = 0.8))
+test_data <- testing(initial_time_split(df, prop = 0.8))
+
+
+train_data %>% 
+  mutate(type = "train") %>% 
+  bind_rows(test_data %>% mutate(type = "test")) %>% 
+  ggplot(aes(date, daily_change, color = type))+
+  geom_line()
+```
+
+
+```{r}
+#arima model
+arima_model <- arima_reg() %>% 
+  set_engine("auto_arima") %>% 
+  fit(daily_change~date, data = train_data)
+
+
+#prophet model
+prophet_model <- prophet_reg() %>% 
+  set_engine("prophet") %>% 
+  fit(daily_change~date, data = train_data)
+
+#tslm model. cannot handle dates, so convert to numeric
+#convert date to continious variable (1,2,3,4,5...), and get month label
+tslm_model <- linear_reg() %>% 
+  set_engine("lm") %>% 
+  fit(daily_change~as.numeric(date) + factor(month(date, label = T)), data = train_data)
+
+
+arima_boosted_model <- arima_boost(learn_rate = 0.015, min_n = 2) %>% 
+  set_engine("auto_arima_xgboost") %>% 
+  fit(daily_change~date+ as.numeric(date) + factor(month(date, label = T)), data = train_data)
+
+#add models into the modeltime table
+
+forecast_table <- modeltime_table(
+  arima_model, 
+  prophet_model,
+  tslm_model,
+  arima_boosted_model
+)
+#these models have only seen the train set
+```
+
+
+```{r}
+#predict each model onto the test set
+#mase is essentially the roc_auc of forecasting
+forecast_table %>% 
+  modeltime_calibrate(test_data) %>% 
+  modeltime_accuracy()
+```
+
+```{r}
+#forecast
+forecast_table %>% 
+  modeltime_calibrate(test_data) %>% 
+  modeltime_forecast(actual_data = test_data) %>% 
+  plot_modeltime_forecast()
+
+#performs like garbage. so we refit
+```
+
+```{r}
+#refitting
+forecast_table %>% 
+  modeltime_refit(df) %>% 
+    modeltime_forecast(h = 7, actual_data = test_data) %>% 
+  plot_modeltime_forecast()
+```
+
+
+
+
+
+
+

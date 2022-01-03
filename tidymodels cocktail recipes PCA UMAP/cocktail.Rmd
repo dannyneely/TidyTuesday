@@ -1,0 +1,144 @@
+```{r}
+boston_cocktails <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-05-26/boston_cocktails.csv")
+
+theme_set(theme_light())
+boston_cocktails %>%
+  count(ingredient, sort = TRUE) %>% View()
+```
+
+```{r}
+#a lot of text that needs cleaning. duplicated and such.
+
+cocktails_parsed <- boston_cocktails %>%
+  mutate(
+    ingredient = str_to_lower(ingredient),  #lowercase
+    ingredient = str_replace_all(ingredient, "-", " "), #remove dashes
+    ingredient = str_remove(ingredient, " liqueur$"),
+    ingredient = str_remove(ingredient, " (if desired)$"), #remove "if desired"
+    ingredient = case_when(
+      str_detect(ingredient, "bitters") ~ "bitters", #replace "bitters"
+      str_detect(ingredient, "lemon") ~ "lemon juice", #all lemon occurences to lemon juice, etc for all fruits
+      str_detect(ingredient, "lime") ~ "lime juice",
+      str_detect(ingredient, "grapefruit") ~ "grapefruit juice",
+      str_detect(ingredient, "orange") ~ "orange juice",
+      TRUE ~ ingredient
+    ),
+    measure = case_when(
+      str_detect(ingredient, "bitters") ~ str_replace(measure, "oz$", "dash"), #replace ounces with dashes
+      TRUE ~ measure
+    ),
+    measure = str_replace(measure, " ?1/2", ".5"), #fractions to decimals
+    measure = str_replace(measure, " ?3/4", ".75"),
+    measure = str_replace(measure, " ?1/4", ".25"),
+    measure_number = parse_number(measure), #parse number
+    measure_number = if_else(str_detect(measure, "dash$"), #dashes to ounces conversion
+      measure_number / 50,
+      measure_number
+    )
+  ) %>%
+  add_count(ingredient) %>%
+  filter(n > 15) %>% #only ingredients that show more than 15 times
+  select(-n) %>%
+  distinct(row_id, ingredient, .keep_all = TRUE) %>%
+  na.omit()
+```
+
+
+```{r}
+#wide format df
+cocktails_df <- cocktails_parsed %>% 
+  select(- row_id, -ingredient_number, -measure) %>% 
+  pivot_wider( names_from = ingredient, values_from = measure_number,
+               values_fill = 0) %>% 
+  janitor::clean_names() %>% 
+  na.omit()
+```
+
+```{r}
+#PCA
+library(tidymodels)
+#unsupervised dataset, so no outcome variable
+pca_rec <- recipe(~.,data = cocktails_df) %>% 
+  update_role(name, category, new_role = "id") %>% 
+  step_normalize(all_predictors()) %>% #centers and scales 
+  step_pca(all_predictors()) 
+
+pca_prep <- pca_rec %>% prep()
+```
+
+```{r}
+#for every principal component calculated, what is the for each term?
+tidied_pca <- tidy(pca_prep, 2)
+
+#cocktail recipes tend to have powdered sugar or simple syrup, not both
+tidied_pca %>% 
+  filter(component %in% paste0("PC", 1:5)) %>% 
+  mutate(component = fct_inorder(component)) %>% 
+  ggplot(aes(value, terms, fill = terms))+
+  geom_col(show.legend = F)+
+  facet_wrap(~component, nrow = 1)+
+  labs(y = NULL)
+```
+
+```{r}
+#understand which cocktail ingredients contribute in the positive and negative directions.
+library(tidytext)
+tidied_pca %>%
+  filter(component %in% paste0("PC", 1:4)) %>%
+  group_by(component) %>%
+  top_n(8, abs(value)) %>%
+  ungroup() %>%
+  mutate(terms = reorder_within(terms, abs(value), component)) %>%
+  ggplot(aes(abs(value), terms, fill = value > 0)) +
+  geom_col() +
+  facet_wrap(~component, scales = "free_y") +
+  scale_y_reordered() +
+  labs(
+    x = "Absolute value of contribution",
+    y = NULL, fill = "Positive?"
+  )
+  
+```
+
+```{r}
+#How are the cocktails distributed in the plane of the first two components?
+
+juice(pca_prep) %>%
+  ggplot(aes(PC1, PC2, label = name)) +
+  geom_point(aes(color = category), alpha = 0.7, size = 2) +
+  geom_text(check_overlap = TRUE, hjust = "inward") +
+  labs(color = NULL)
+```
+
+```{r}
+#UMAP, an entirely different algorithm for dimensionality reduction based on ideas from topological data analysis
+
+library(embed)
+
+umap_rec <- recipe(~., data = cocktails_df) %>%
+  update_role(name, category, new_role = "id") %>%
+  step_normalize(all_predictors()) %>%
+  step_umap(all_predictors())
+
+umap_prep <- prep(umap_rec)
+
+umap_prep
+```
+
+```{r}
+#plot first two UMAP componenets
+juice(umap_prep) %>%
+  ggplot(aes(umap_1, umap_2, label = name)) +
+  geom_point(aes(color = category), alpha = 0.7, size = 2) +
+  geom_text(check_overlap = TRUE, hjust = "inward") +
+  labs(color = NULL)
+```
+
+
+
+
+
+
+
+
+

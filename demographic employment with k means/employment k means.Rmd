@@ -1,0 +1,107 @@
+```{r}
+#use k means to see which occupations are most like each other, as  represented by various demographics
+library(tidytuesdayR)
+library(tidyverse)
+
+tt <- tt_load("2021-02-23")
+
+employed <- tt$employed
+head(employed)
+
+```
+
+```{r}
+#tidy
+sapply(employed, function(x) sum(is.na(x)))
+
+employed_tidy <- employed %>% 
+  filter(!is.na(employ_n)) %>% 
+  group_by(occupation = paste(industry, minor_occupation),
+           race_gender) %>%  #group by and paste creates new named column
+  summarise(n = mean(employ_n)) %>% 
+  ungroup()
+  
+```
+
+```{r}
+employment_demo <- employed_tidy %>%
+  filter(race_gender %in% c("Women", "Black or African American", "Asian")) %>%
+  pivot_wider(names_from = race_gender, values_from = n, values_fill = 0) %>%
+  janitor::clean_names() %>%
+  left_join(employed_tidy %>%
+    filter(race_gender == "TOTAL") %>%
+    select(-race_gender) %>%
+    rename(total = n)) %>%
+  filter(total > 1e3) %>%
+  mutate(across(c(asian, black_or_african_american, women), ~ . / (total)), #get proportions of total for each 
+    total = log(total),
+    across(where(is.numeric), ~ as.numeric(scale(.)))  #scale each number for k means
+  ) %>%
+  mutate(occupation = snakecase::to_snake_case(occupation))
+
+employment_demo
+
+```
+
+```{r}
+#randomly assigning k=3 clusters
+employment_clust <- kmeans(select(employment_demo, -occupation), centers = 3)
+summary(employment_clust)
+
+
+```
+
+```{r}
+#view centers
+library(broom)
+tidy(employment_clust)
+
+```
+
+```{r}
+#augment will give our data plus the cluster it belongs to
+augment(employment_clust, employment_demo) %>% 
+  ggplot(aes(total, women, color = .cluster))+
+  geom_point()
+
+#cluster 2 is more people working and more women
+#cluster 1 is less people less women
+```
+
+```{r}
+#choosing k
+kclusts <-
+  tibble(k = 1:9) %>%
+  mutate(
+    kclust = map(k, ~ kmeans(select(employment_demo, -occupation), .x)),
+    glanced = map(kclust, glance), #look at how well the clustering is doing
+  )
+
+kclusts %>%
+  unnest(cols = c(glanced)) %>%
+  ggplot(aes(k, tot.withinss)) + #tot.withinss is how well the cluster is fitting the data 
+  geom_line(alpha = 0.5, size = 1.2, color = "midnightblue") +
+  geom_point(size = 2, color = "midnightblue")
+
+#choose k at elbow
+#k = 5
+```
+
+```{r}
+#recluster with k = 5
+library(plotly)
+final_clust <- kmeans(select(employment_demo, -occupation), centers = 5)
+
+p <- augment(final_clust, employment_demo) %>%
+  ggplot(aes(total, women, color = .cluster, name = occupation)) +
+  geom_point() 
+
+ggplotly(p)
+```
+
+
+
+
+
+
+

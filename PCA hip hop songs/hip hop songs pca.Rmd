@@ -1,0 +1,111 @@
+```{r}
+library(tidymodels)
+library(tidyverse)
+rankings <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-04-14/rankings.csv")
+
+```
+
+```{r}
+rankings %>% 
+  mutate(search_query = paste(title, artist),
+         search_query = str_to_lower(search_query))
+
+
+
+```
+
+```{r}
+#no spotify api token. 
+#but here's how to do a nice correation plot with corrr
+library(corrr)
+
+ranking_df %>%
+  select(year:tempo) %>%
+  correlate() %>%
+  rearrange() %>%
+  shave() %>%
+  rplot(shape = 15, colours = c("darkorange", "white", "darkcyan")) +
+  theme_plex()
+```
+
+```{r}
+#how to do PCA with tidymodels
+
+ranking_rec <- recipe(points ~ ., data = ranking_df) %>%
+  update_role(title, artist, new_role = "id") %>%
+  step_log(points) %>%
+  step_normalize(all_predictors()) %>%
+  step_pca(all_predictors())
+
+ranking_prep <- prep(ranking_rec)
+
+ranking_prep
+```
+
+```{r}
+tidied_pca <- tidy(ranking_prep, 3)
+
+tidied_pca %>%
+  mutate(component = fct_inorder(component)) %>%
+  ggplot(aes(value, terms, fill = terms)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~component) +
+  labs(y = NULL)
+```
+
+```{r}
+library(tidytext)
+
+tidied_pca %>%
+  filter(component %in% c("PC1", "PC2", "PC3", "PC4")) %>%
+  group_by(component) %>%
+  top_n(6, abs(value)) %>%
+  ungroup() %>%
+  mutate(terms = reorder_within(terms, abs(value), component)) %>%
+  ggplot(aes(abs(value), terms, fill = value > 0)) +
+  geom_col() +
+  facet_wrap(~component, scales = "free_y") +
+  scale_y_reordered() +
+  labs(
+    x = "Absolute value of contribution",
+    y = NULL, fill = "Positive?"
+  )
+```
+
+```{r}
+juice(ranking_prep) %>%
+  ggplot(aes(PC1, PC2, label = title)) +
+  geom_point(alpha = 0.2) +
+  geom_text(check_overlap = TRUE, family = "IBMPlexSans")
+```
+
+```{r}
+sdev <- ranking_prep$steps[[3]]$res$sdev
+
+percent_variation <- sdev^2 / sum(sdev^2)
+
+tibble(
+  component = unique(tidied_pca$component),
+  percent_var = percent_variation ## use cumsum() to find cumulative, if you prefer
+) %>%
+  mutate(component = fct_inorder(component)) %>%
+  ggplot(aes(component, percent_var)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = NULL, y = "Percent variance explained by each PCA component")
+```
+
+```{r}
+pca_fit <- juice(ranking_prep) %>%
+  select(-title, -artist) %>%
+  lm(points ~ ., data = .)
+
+summary(pca_fit)
+```
+
+
+
+
+
+
+

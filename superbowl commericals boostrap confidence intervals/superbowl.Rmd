@@ -1,0 +1,89 @@
+```{r}
+library(tidytuesdayR)
+library(tidyverse)
+
+tt <- tt_load("2021-03-02")
+
+youtube <- tt$youtube
+head(youtube)
+
+```
+
+```{r}
+youtube %>%
+  select(year, funny:use_sex) %>%
+  pivot_longer(funny:use_sex) %>%
+  group_by(year, name) %>%
+  summarise(prop = mean(value)) %>%
+  ungroup() %>%
+  ggplot(aes(year, prop, color = name)) +
+  geom_line(size = 1.2, show.legend = FALSE) +
+  facet_wrap(vars(name)) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = NULL, y = "% of commercials")
+
+```
+
+```{r}
+#use a linear model to estimate if and how much these characteristics are changing with time.
+simple_mod <- lm(year ~ funny + show_product_quickly +
+  patriotic + celebrity + danger + animals + use_sex,
+data = youtube
+)
+
+summary(simple_mod)
+```
+
+```{r}
+#use resampled datasets. fit 1000 times. compare to the linear model - how often does funny downtrend? how often do the results align?  
+library(rsample)
+bootstraps(youtube, times = 1000)
+
+```
+
+```{r}
+#using reg_intervals makes boostraps for you. fits 2001 times by percentile type
+set.seed(321)
+youtube_intervals <- reg_intervals(year ~ funny + show_product_quickly +
+  patriotic + celebrity + danger + animals + use_sex,
+data = youtube,
+type = "percentile",
+keep_reps = TRUE
+)
+
+youtube_intervals
+```
+
+```{r}
+#plot intervals
+youtube_intervals %>% 
+  mutate(term=str_remove(term, "TRUE"),
+         term = fct_reorder(term, .estimate)) %>%  #remove TRUE
+  ggplot(aes(.estimate,term))+
+  geom_vline(xintercept = 0, size = 1.5, lty = 2, color = "gray88")+
+  geom_point()+
+  geom_errorbarh(aes(xmin = .lower, xmax = .upper))
+
+#positives are increasing over time, negatives decreasing over time
+```
+
+```{r}
+#can look at the distributions for each term
+youtube_intervals %>%
+  mutate(
+    term = str_remove(term, "TRUE"),
+    term = fct_reorder(term, .estimate)
+  ) %>%
+  unnest(.replicates) %>%
+  ggplot(aes(estimate, fill = term)) +
+  geom_vline(xintercept = 0, size = 1.5, lty = 2, color = "gray50") +
+  geom_histogram(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(vars(term))
+```
+
+
+
+
+
+
+

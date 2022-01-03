@@ -1,0 +1,53 @@
+```{r}
+#imputing missing data using recipes package
+african_names <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-06-16/african_names.csv")
+head(african_names)
+
+skimr::skim(african_names)
+```
+
+```{r}
+#look at sets of missing data.
+#look at how many people have age missing, age AND gender missing, age AND gender AND height missing, etc
+library(naniar)
+african_names %>% 
+  select(gender,age,height) %>% 
+  gg_miss_upset()
+```
+
+
+```{r}
+liberated_df <- african_names %>% 
+  filter(year_arrival < 1850) %>% 
+  mutate(gender = case_when(gender == "Boy"~"Man",
+                            gender == "Girl"~"Woman",
+                              TRUE ~ gender)) %>% 
+  mutate_if(is.character,factor)
+
+
+```
+
+```{r}
+library(recipes)
+
+impute_rec <- recipe(year_arrival~gender+age+height, data = liberated_df) %>% 
+  step_impute_mean(height) %>% 
+  step_impute_knn(all_predictors())
+
+```
+
+```{r}
+imputed <- prep(impute_rec) %>% 
+  juice()
+```
+
+```{r}
+fit_lm <- lm(year_arrival ~ gender + age, data = imputed)
+summary(fit_lm)
+
+tidy(fit_lm)
+```
+
+
+
+

@@ -1,0 +1,149 @@
+```{r}
+#predicting if the hit was a home run (is_home_run)
+library(tidyverse)
+
+train <- read_csv("tidytuesday/tune xgboost racing methods homeruns/train.csv")
+train
+```
+
+```{r}
+#% of home runs over plate 
+train %>% 
+  ggplot(aes(plate_x, plate_z, z = is_home_run))+
+  stat_summary_hex(bins = 10)+
+  scale_fill_viridis_c(labels = scales::percent)
+
+#launch angle and speed
+train_raw %>%
+  ggplot(aes(launch_angle, launch_speed, z = is_home_run)) +
+  stat_summary_hex(alpha = 0.8, bins = 15) +
+  scale_fill_viridis_c(labels = percent) +
+  labs(fill = "% home runs")
+
+
+```
+
+```{r}
+#can see that home runs are most frequent when fewer balls, and earlier in inning
+train %>% 
+  mutate(is_home_run = if_else(as.logical(is_home_run), "yes", "no")) %>%
+  select(is_home_run, balls, strikes, inning) %>% 
+  pivot_longer(balls:inning) %>% 
+  mutate(name = fct_inorder(name)) %>% 
+  ggplot(aes(value, after_stat(density), fill = is_home_run)) +
+  geom_histogram(alpha = 0.5, binwidth = 1, position = "identity") +
+  facet_wrap(~name, scales = "free") +
+  labs(fill = "Home run?")
+```
+
+```{r}
+#model
+library(tidymodels)
+set.seed(123)
+bb_split <- train %>%
+  mutate(
+    is_home_run = if_else(as.logical(is_home_run), "HR", "no"),
+    is_home_run = factor(is_home_run)
+  ) %>%
+  initial_split(strata = is_home_run)
+bb_train <- training(bb_split)
+bb_test <- testing(bb_split)
+
+#cross val
+set.seed(234)
+bb_folds <- vfold_cv(bb_train, strata = is_home_run)
+bb_folds
+```
+
+```{r}
+#recipe
+bb_rec <-
+  recipe(is_home_run ~ launch_angle + launch_speed + plate_x + plate_z +
+    bb_type + bearing + pitch_mph +
+    is_pitcher_lefty + is_batter_lefty +
+    inning + balls + strikes + game_date,
+  data = bb_train
+  ) %>%
+  step_date(game_date, features = c("week"), keep_original_cols = F) %>% 
+  step_unknown(all_nominal_predictors()) %>% 
+  step_dummy(all_nominal_predictors(), one_hot = T) %>% 
+  step_impute_median(all_numeric_predictors(),  -launch_angle, -launch_speed) %>%  #don't impute median for those 
+  step_impute_linear(launch_angle, launch_speed,
+                     impute_with = imp_vars(plate_x, plate_z,
+                                            pitch_mph)) %>%  #impute with a linear model
+  step_nzv(all_predictors())
+
+prep(bb_rec)
+```
+
+```{r}
+#model spec
+xgb_spec <- boost_tree(
+  trees = tune(),
+  min_n = tune(),
+  mtry = tune(),
+  learn_rate = 0.01
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+```
+
+```{r}
+#worflow
+xgb_wflow <- workflow() %>% 
+  add_model(xgb_spec) %>% 
+  add_recipe(bb_rec)
+```
+
+```{r}
+#tuning xgboost with finetune
+library(finetune)
+doParallel::registerDoParallel()
+set.seed(21)
+#tune race anova - instead of trying  every possible combination of hyperparameters  on every resample, it tries all of them on a couple resamples, and then evaluates based on how they're doing. if some are clearly worse, then they get eliminated, then keeps going. great for xgboost where there are a lot of hyperparameters and you don't want to keep trying them all when some are clearly bad.
+xgb_res <- tune_race_anova(
+  xgb_wflow,
+  bb_folds,
+  grid = 15,
+  metrics = metric_set(mn_log_loss),
+  control = control_race(verbose_elim = T)
+)
+
+plot_race(xgb_res) #can see how most parameter combinations were thrown away, only bottom one is kept 
+```
+
+```{r}
+#show metrics, final fit
+show_best(xgb_res)
+
+xgb_last <- xgb_wflow %>%
+  finalize_workflow(select_best(xgb_res, "mn_log_loss")) %>%
+  last_fit(bb_split)
+
+xgb_last
+```
+
+```{r}
+#roc curve
+collect_predictions(xgb_last) %>%
+  mn_log_loss(is_home_run, .pred_HR)
+```
+
+```{r}
+#variable importance
+library(vip)
+extract_workflow(xgb_last) %>%
+  extract_fit_parsnip() %>%
+  vip(geom = "point", num_features = 15)
+```
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,97 @@
+```{r}
+#predict which dataset a point belongs to
+library(datasauRus)
+library(tidyverse)
+
+datasaurus_dozen <- as_tibble(datasaurus_dozen)
+```
+
+```{r}
+#plot each dataset
+datasaurus_dozen %>% 
+  ggplot(aes(x = x, y = y, color = dataset))+
+  geom_point(alpha = 0.7, size = 2.5)+
+  facet_wrap(~dataset)
+```
+
+```{r}
+#same mean, sd, cor
+datasaurus_dozen %>% 
+  group_by(dataset) %>% 
+  summarise(across(c(x,y), list(mean = mean, sd = sd)),
+            x_y_cor = cor(x,y))
+```
+
+```{r}
+#bootstrap
+library(tidymodels)
+dino_folds <- datasaurus_dozen %>% 
+  mutate(dataset = factor(dataset)) %>% 
+  bootstraps()
+dino_folds
+```
+
+```{r}
+doParallel::registerDoParallel()
+#model
+dino_spec <- rand_forest(trees= 1000) %>% 
+  set_mode("classification") %>% 
+  set_engine("ranger")
+
+#workflow
+dino_wflow <- workflow() %>% 
+  add_model(dino_spec) %>% 
+  add_formula(dataset~x+y)
+
+#fit resamples
+dino_res <- fit_resamples(
+  dino_wflow,
+  resamples = dino_folds,
+  control = control_resamples(save_pred = T)
+)
+
+```
+
+```{r}
+#evaluate
+dino_res %>% collect_metrics()
+
+#get predictions
+dino_res %>% collect_predictions() %>% 
+  group_by(id) %>% 
+  ppv(dataset, .pred_class)
+```
+
+```{r}
+#plot roc curve
+dino_res %>% 
+  collect_predictions() %>% 
+  group_by(id) %>% 
+  roc_curve(dataset, .pred_away:.pred_x_shape) %>% 
+  autoplot()
+
+```
+
+```{r}
+#confusion matrix
+dino_res %>% 
+  collect_predictions() %>% 
+  conf_mat(dataset, .pred_class)
+
+
+dino_rs %>%
+  collect_predictions() %>%
+  filter(.pred_class != dataset) %>%
+  conf_mat(dataset, .pred_class) 
+
+```
+
+
+
+
+
+
+
+
+
+

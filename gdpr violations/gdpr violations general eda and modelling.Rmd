@@ -1,0 +1,155 @@
+```{r}
+library(tidymodels)
+library(tidyverse)
+theme_set(theme_light())
+gdpr_raw <- readr::read_tsv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-04-21/gdpr_violations.tsv")
+
+```
+
+```{r}
+head(gdpr_raw)
+skimr::skim(gdpr_raw)
+```
+
+```{r}
+gdpr_tidy <- gdpr_raw %>% 
+  transmute(id,price,country = name, article_violated, 
+            articles = str_extract_all(article_violated, "Art. [:digit:]+| Art.[:digit:]+")) %>% #regex for article numbers
+    mutate(total_articles = map_int(articles, length)) %>%#get how many articles in each violation
+  unnest(articles) %>% 
+  add_count(articles) %>% #find how often each article appears
+  filter(n > 10) %>% #only keep articles that appear more than 10 times
+  select(-n)
+```
+
+```{r}
+#bee plot
+library(ggbeeswarm)
+
+gdpr_tidy %>%
+  mutate(
+    articles = str_replace_all(articles, "Art. ", "Article "),
+    articles = fct_reorder(articles, price)
+  ) %>%
+  ggplot(aes(articles, price + 1, color = articles, fill = articles)) +
+  geom_boxplot(alpha = 0.2, outlier.colour = NA) +
+  geom_quasirandom() +
+  scale_y_log10(labels = scales::dollar_format(prefix = "€")) +
+  labs(
+    x = NULL, y = "GDPR fine (EUR)",
+    title = "GDPR fines levied by article",
+    subtitle = "For 250 violations in 25 countries"
+  ) +
+  theme(legend.position = "none")
+```
+
+```{r}
+#creating modelling dataset
+gdpr_violations <- gdpr_tidy %>%
+  mutate(value = 1) %>%
+  select(-article_violated) %>%
+  pivot_wider(
+    names_from = articles, values_from = value,
+    values_fn = list(value = max), values_fill = list(value = 0)
+  ) %>%
+  janitor::clean_names()
+```
+
+```{r}
+#recipe
+gdpr_rec <- recipe(price ~., data = gdpr_violations) %>% 
+  update_role(id, new_role = "id") %>% 
+  step_log(price, base = 10, offset = 1, skip = TRUE) %>%
+  step_other(country, other = "Other") %>% 
+  step_dummy(all_nominal()) %>% 
+  step_zv(all_predictors())
+  
+  
+```
+
+```{r}
+#create workflow
+gdpr_wflow <- workflow() %>% 
+  add_recipe(gdpr_rec) %>% 
+  add_model(linear_reg() %>% 
+              set_engine('lm'))
+
+
+#can also fit workflow to the data
+gdpr_fit <- gdpr_wflow %>%
+  fit(data = gdpr_violations)
+
+gdpr_fit
+```
+
+```{r}
+#get 
+gdpr_fit %>%
+  pull_workflow_fit() %>%
+  tidy() %>%
+  arrange(estimate) %>%
+  kable()
+```
+
+```{r}
+#create new sample data to test model on
+new_gdpr <- crossing(
+  country = "Other",
+  art_5 = 0:1,
+  art_6 = 0:1,
+  art_13 = 0:1,
+  art_15 = 0:1,
+  art_32 = 0:1
+) %>%
+  mutate(
+    id = row_number(),
+    total_articles = art_5 + art_6 + art_13 + art_15 + art_32
+  )
+
+new_gdpr
+
+
+mean_pred <- predict(gdpr_fit, new_data = new_gdpr)
+
+conf_int_pred <- predict(gdpr_fit, new_data = new_gdpr, type = "conf_int")
+
+gdpr_res <- new_gdpr %>% 
+  bind_cols(mean_pred) %>% 
+  bind_cols(conf_int_pred)
+```
+
+```{r}
+gdpr_res %>%
+  filter(total_articles == 1) %>%
+  pivot_longer(art_5:art_32) %>%
+  filter(value > 0) %>%
+  mutate(
+    name = str_replace_all(name, "art_", "Article "),
+    name = fct_reorder(name, .pred)
+  ) %>%
+  ggplot(aes(name, 10^.pred, color = name)) +
+  geom_point(size = 3.5) +
+  geom_errorbar(aes(
+    ymin = 10^.pred_lower,
+    ymax = 10^.pred_upper
+  ),
+  width = 0.2, alpha = 0.7
+  ) +
+  labs(
+    x = NULL, y = "Increase in fine (EUR)",
+    title = "Predicted fine for each type of GDPR article violation",
+    subtitle = "Modeling based on 250 violations in 25 countries"
+  ) +
+  scale_y_log10(labels = scales::dollar_format(prefix = "€", accuracy = 1)) +
+  theme(legend.position = "none")
+```
+
+
+
+
+
+
+
+
+
+

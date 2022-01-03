@@ -1,0 +1,142 @@
+```{r}
+library(tidytuesdayR)
+
+tt <- tt_load("2021-07-13")
+scoobydoo <- tt$scoobydoo
+scoobydoo
+
+
+```
+
+```{r}
+#count real and fake
+scoobydoo %>%
+  filter(monster_amount > 0) %>%
+  count(monster_real) 
+
+#count real and fake over time
+library(lubridate)
+scoobydoo %>% 
+  filter(monster_amount>0) %>% 
+  count(
+    year_aired = 10 * ((lubridate::year(date_aired) + 1) %/% 10),
+    monster_real
+  ) %>% 
+  mutate(year_aired = factor(year_aired)) %>%
+  ggplot(aes(year_aired, n, fill = monster_real)) +
+  geom_col(position = position_dodge(preserve = "single"), alpha = 0.8) +
+  labs(x = "Date aired", y = "Monsters per decade", fill = "Real monster?")
+```
+
+```{r}
+#see if imdb rating is impacted by a real or fake monster
+scoobydoo %>%
+  filter(monster_amount > 0) %>%
+  mutate(imdb = parse_number(imdb)) %>%
+  ggplot(aes(imdb, after_stat(density), fill = monster_real)) +
+  geom_histogram(position = "identity", alpha = 0.5) +
+  labs(x = "IMDB rating", y = "Density", fill = "Real monster?")
+```
+
+```{r}
+#model
+library(tidymodels)
+
+set.seed(312)
+scooby_split <- scoobydoo %>% 
+    filter(monster_amount > 0, !is.na(imdb)) %>%
+  mutate(
+    imdb = parse_number(imdb),
+    year_aired = lubridate::year(date_aired)
+  ) %>%
+  mutate(monster_real = case_when(monster_real == "FALSE" ~ "fake",
+                                  TRUE~ "real"),
+         monster_real = factor(monster_real)) %>% 
+    select(year_aired, imdb, monster_real, title) %>%
+  initial_split(strata = monster_real)
+
+scooby_train <- training(scooby_split)
+scooby_test <- testing(scooby_split)
+
+
+scooby_splits <- bootstraps(scooby_train, strata  = monster_real)
+
+```
+
+```{r}
+#decision tree model with tuning hypers
+tree_spec <- decision_tree(
+  cost_complexity = tune(),
+  min_n = tune(),
+  tree_depth = tune()
+) %>% 
+  set_mode("classification") %>% 
+  set_engine("rpart")
+```
+
+```{r}
+#tuning grid. 64 differnet combinations (4^3)
+tree_grid <- grid_regular(
+  cost_complexity(),
+  min_n(),
+  tree_depth(),
+  levels = 4
+)
+
+```
+
+```{r}
+#setup tuninng
+doParallel::registerDoParallel()
+
+tree_res <-
+  tune_grid(
+    tree_spec,
+    monster_real ~ year_aired + imdb,
+    resamples = scooby_splits,
+    grid = tree_grid,
+    metrics = metric_set(accuracy, roc_auc, sensitivity, specificity)
+  )
+
+show_best(tree_res)
+autoplot(tree_res)
+```
+
+```{r}
+#choose best model
+simpler_tree <- select_by_one_std_err(tree_res,
+  -cost_complexity,
+  metric = "roc_auc"
+)
+
+#final model
+final_tree <- finalize_model(tree_spec, simpler_tree)
+```
+
+```{r}
+#fit to entire dataset
+final_fit <- fit(final_tree, monster_real~year_aired+imdb, data= scooby_train)
+final_res <- last_fit(final_tree, monster_real ~ year_aired + imdb, scooby_split)
+
+collect_metrics(final_res)
+```
+
+```{r}
+#visualize decision tree
+library(parttree)
+
+scooby_train %>%
+  ggplot(aes(imdb, year_aired)) +
+  geom_parttree(data = final_fit, aes(fill = monster_real), alpha = 0.2) +
+  geom_jitter(alpha = 0.7, width = 0.05, height = 0.2, aes(color = monster_real))
+```
+
+
+
+
+
+
+
+
+
+

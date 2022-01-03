@@ -1,0 +1,142 @@
+```{r}
+#using netflix description text, build a classification model to determine if the product is a show or a movie
+library(tidytuesdayR)
+library(tidyverse)
+tt <- tt_load("2021-04-20")
+netflix <- tt$netflix_titles
+head(netflix)
+```
+
+
+```{r}
+#begin text processing
+library(tidytext)
+netflix %>% 
+  unnest_tokens(word, description) %>% 
+  anti_join(get_stopwords()) %>% 
+  count(type, word, sort = T) %>% 
+  group_by(type) %>% 
+  slice_max(n,n = 15) %>% 
+  ungroup() %>% 
+  mutate(word = reorder_within(word, n, type)) %>% 
+  ggplot(aes(n, word, fill = type))+
+  geom_col()+
+  scale_y_reordered()+
+  facet_wrap(~type, scales = "free_y")
+
+
+```
+
+```{r}
+#model
+library(tidymodels)
+set.seed(123)
+netflix_split <- netflix %>% 
+  select(type, description) %>% 
+  initial_split(strata = type)
+netflix_train = training(netflix_split)
+netflix_test = testing(netflix_split)
+
+ netflix_folds <- vfold_cv(netflix_train, strata = type)
+
+```
+
+```{r}
+#recipe
+library(textrecipes)
+library(themis)
+netflix_rec <- recipe(type~description, data  = netflix_train) %>% 
+  step_tokenize(description) %>% 
+  step_tokenfilter(description, max_tokens = 1000) %>% 
+  step_tfidf(description) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_smote(type) 
+```
+
+```{r}
+#spec
+netflix_spec <- svm_linear() %>% 
+  set_mode("classification") %>% 
+  set_engine("LiblineaR")
+
+netflix_workflow <- workflow() %>% 
+  add_recipe(netflix_rec) %>% 
+  add_model(netflix_spec)
+
+```
+
+```{r}
+#fit model
+set.seed(121)
+svm_res <- fit_resamples(
+  netflix_workflow,
+  netflix_folds,
+  metrics = metric_set(accuracy, recall, precision),
+  control = control_resamples(save_pred = T)
+)
+
+
+```
+
+```{r}
+#confusion matrix for resamples
+collect_metrics(svm_res)
+
+svm_res %>% 
+  conf_mat_resampled(tidy = F) %>% 
+  autoplot()
+```
+
+```{r}
+final_fit <- last_fit(
+  netflix_workflow,
+         netflix_split,
+           metrics = metric_set(accuracy, recall, precision)
+)
+
+collect_metrics(final_fit)
+
+```
+
+
+
+
+
+
+```{r}
+#testing set predictions
+collect_predictions(final_fit)
+
+conf_mat_resampled(type, .pred_class) %>% 
+  autoplot()
+  
+```
+
+```{r}
+#what to do with the fit going forward - can save it and can slo do variable importnace. 
+#workflow has 2 components in it - the feature engineering and the model algorithm. by pulling out the parsnip fit, we can tidy and plot variable importance
+netflix_fit <- pull_workflow_fit(final_fit$.workflow[[1]])
+
+```
+
+```{r}
+#plot the variable importance
+tidy(netflix_fit) %>% 
+  filter(term != "Bias") %>% 
+  group_by(sign = estimate > 0) %>% 
+  slice_max(abs(estimate), n = 15) %>% 
+  ungroup() %>% 
+  mutate(term = str_remove(term, "tfidf_description_"),
+         sign =  if_else(sign, "More from TV Shows",
+         "More from Movies")) %>% 
+  ggplot(aes(abs(estimate), fct_reorder(term,abs(estimate)), fill = sign))+
+  geom_col(show.legend = F)+
+  facet_wrap(~sign, scales = "free_y")
+
+```
+
+
+
+
+
+

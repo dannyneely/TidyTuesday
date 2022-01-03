@@ -1,0 +1,35 @@
+```{r}
+library(tidytuesdayR)
+library(tidyverse)
+tt <- tt_load("2021-02-09")
+debt <- tt$student_debt
+head(debt)
+```
+
+```{r}
+#vrey simple model
+library(tidymodels)
+
+lm_spec <- linear_reg() %>% 
+  set_engine("lm")
+
+lm_fit <- lm_spec %>% 
+  fit(loan_debt_pct ~year * race, data = debt) 
+
+tidy(lm_fit)
+#hard to interpret all the coefficients.
+```
+
+```{r}
+#explore differently
+#augment will add columns for predicitons to the given data
+new_points <- crossing(race = c("Black","Hispanic","White"),
+                                year = 1990:2020)
+
+
+augment(lm_fit, new_points)
+#now we have what is the predicted percent of families
+#In tidymodels, `predict()` also returns a tibble, but only the predictions themselves. The way that `augment()` is different is that it keeps the data you are adding the predictions too.
+```
+
+

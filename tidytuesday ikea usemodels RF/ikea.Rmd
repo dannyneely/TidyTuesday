@@ -1,0 +1,138 @@
+```{r}
+library(tidytuesdayR)
+library(tidymodels)
+library(tidyverse)
+
+tt <- tt_load("2020-11-03")
+ikea <- tt$ikea
+head(ikea)
+```
+
+```{r}
+#eda of dimensions and price
+ikea %>% 
+  select(X1, price, depth, height, width) %>% 
+  pivot_longer(depth:width, names_to = "dim") %>% 
+  ggplot(aes(value, price, color = dim))+
+  geom_point(alpha = 0.4)+
+  scale_x_log10()+
+  scale_y_log10()+
+  facet_wrap(~dim, scales = "free_x")
+```
+
+```{r}
+#build df for modelling
+ikea_df <- ikea %>% 
+  select(price, name, category, depth, height, width) %>% 
+  mutate(price = log10(price)) %>% 
+  mutate_if(is.character,factor)
+```
+
+```{r}
+#train test split and folds
+library(tidymodels) 
+
+ikea_split <- initial_split(ikea_df, strata = price)
+ikea_train <- training(ikea_split)
+ikea_test <- testing(ikea_split)
+
+#cross validation wont work without a big enough evaluation set since no replacement. use boostrapping instead.
+ikea_folds <- bootstraps(ikea_train, strata = price)
+```
+
+```{r}
+#model spec
+#usemodels outputs boilerplate code for whatever ML algo you desire
+library(usemodels)
+use_ranger(price~., data = ikea_train)
+
+```
+
+```{r}
+library(textrecipes)
+ranger_recipe <- 
+  recipe(formula = price ~ ., data = ikea_train) %>% 
+  step_other(name, category, threshold = 0.01) %>% 
+  step_clean_levels(name, category) %>%  #deal with the slashes, spaces, etc
+  step_impute_knn(depth, height, width)
+
+ranger_spec <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>% 
+  set_mode("regression") %>% 
+  set_engine("ranger") 
+
+ranger_workflow <- 
+  workflow() %>% 
+  add_recipe(ranger_recipe) %>% 
+  add_model(ranger_spec) 
+
+set.seed(41012)
+doParallel::registerDoParallel()
+ranger_tune <-
+  tune_grid(ranger_workflow, 
+            resamples = ikea_folds, 
+            grid = 11)
+#for the 25 bootstrap resamples, trying 11 different candidate models that have different values for mtry and min_n. trains on the analysis set for each bootstrap, and evaluates on assessment part 
+
+```
+
+```{r}
+#evaluate tuned metrics
+show_best(ranger_tune, "rmse")
+autoplot(ranger_tune)
+```
+
+```{r}
+#finalize the workflow
+final_rf <- ranger_workflow %>% 
+  finalize_workflow(select_best(ranger_tune))
+
+final_rf
+
+```
+
+```{r}
+#fitting to the whole training data, evaluating on the test set
+ikea_fit <- last_fit(final_rf, ikea_split)
+collect_metrics(ikea_fit)
+
+#get preds on test set. plot true price vs our model's predicted price
+collect_predictions(ikea_fit) %>% 
+  ggplot(aes(price, .pred))+
+  geom_abline(lty = 2, col = "gray50")+
+  geom_point(col = "midnightblue",alpha = 0.3)
+```
+
+```{r}
+#if you want to save the model for later and use it to make predicitions, it's in the workflow
+predict(ikea_fit$.workflow[[1]], ikea_test[15,])
+```
+
+```{r}
+#feature importance
+library(vip)
+
+#must create a new specification for ranger models
+imp_spec <- ranger_spec %>% 
+  finalize_model(select_best(ranger_tune)) %>% 
+  set_engine("ranger", importance = "permutation")
+
+#barplot of feature importance
+workflow() %>% 
+  add_model(imp_spec) %>% 
+  add_recipe(ranger_recipe) %>% 
+  fit(ikea_train) %>% 
+  pull_workflow_fit() %>% 
+  vip(aesthetics = list(alpha = 0.8, fill = "midnightblue"))
+```
+
+
+
+
+
+
+
+
+
+
+

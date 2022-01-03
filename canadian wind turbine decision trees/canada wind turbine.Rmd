@@ -1,0 +1,156 @@
+```{r}
+library(tidytuesdayR)
+library(tidyverse)
+
+tt <- tt_load("2020-10-27")
+head(turbines)
+
+turbines <- tt$`wind-turbine`
+
+theme_set(theme_light())
+```
+
+```{r}
+turbines_df <- turbines %>%  
+  transmute(turbine_capacity = turbine_rated_capacity_k_w, #transmute drops all other vars not listed while mutating
+            rotor_diameter_m,
+            hub_height_m,
+            commissioning_date = parse_number(commissioning_date),  #parse number takes the first number found
+            province_territory = fct_lump_n(province_territory, 8),
+            model = fct_lump_n(model, 10)) %>% 
+  filter(!is.na(turbine_capacity)) %>% 
+  mutate_if(is.character, factor)
+```
+
+```{r}
+#eda for numeric values vs capacity
+turbines_df %>% 
+  select(turbine_capacity: commissioning_date) %>% 
+  pivot_longer(rotor_diameter_m: commissioning_date) %>% 
+  ggplot(aes(turbine_capacity, value))+
+  geom_hex(bins = 15, alpha = 0.8)+
+  geom_smooth(method = 'lm')+
+  facet_wrap(~name, scales = "free_y")+
+  scale_fill_gradient(high = 'cyan3')
+```
+
+```{r}
+#build model
+library(tidymodels)
+set.seed(2)
+
+#stratifying on a continuous variable. divides capacity into quantiles then stratified resampling within each of the quantiles
+wind_split <- initial_split(turbines_df, strata = turbine_capacity)
+wind_train <- training(wind_split)
+wind_test <- testing(wind_split)
+
+wind_folds <- vfold_cv(wind_train, strata = turbine_capacity)
+```
+
+```{r}
+#decision tree spec
+#cost complexity - how complicated the cost for tuning the tree will be
+#tree depth - how many nodes to go down the tree
+#min_n - minimum number of data points at each split for each node
+tree_spec <- decision_tree(
+  cost_complexity = tune(),
+  tree_depth = tune(),
+  min_n = tune()
+) %>% 
+  set_engine("rpart") %>% 
+  set_mode("regression")
+
+
+#grid for possible parameters to tune on
+#grid regular defaults to 3 values for each hyperparameter
+tree_grid <- grid_regular(cost_complexity(), tree_depth(), min_n(),
+                          levels = 4)
+```
+
+```{r}
+#begin tuning
+#no workflow, just tuning directly
+doParallel::registerDoParallel()
+set.seed(23)
+
+tree_res <- tune_grid(
+  tree_spec,
+  turbine_capacity~., 
+  resamples = wind_folds,
+  grid = tree_grid,
+  metrics = metric_set(rmse, rsq, mae, mape)
+)
+
+#for each set of the 64 possible parameters from the grid, we are training them on the 10 resamples. training on the 4400, and evaluating on the 488 for each fold.
+tree_res 
+```
+
+```{r}
+#evaluate results
+collect_metrics(tree_res) 
+
+autoplot(tree_res)
+
+show_best(tree_res, "mape")
+
+select_best(tree_res, "rmse")
+
+#finalize model
+final_tree <- finalize_model(tree_spec, select_best(tree_res, "rmse"))
+#still not fit. only created model with best tuned hyperparameters
+```
+
+```{r}
+#fit model to train data.
+final_fit <- fit(final_tree, turbine_capacity~., wind_train)
+
+#or use last fit. fits on training data, evaluates on test data
+final_res <- last_fit(final_tree, turbine_capacity~., wind_split)
+```
+
+```{r}
+#predict with final fit
+predict(final_fit, wind_train[44,])
+#or this
+predict(final_res$.workflow[[1]], wind_train[44,])
+```
+
+```{r}
+#variable importance
+library(vip)
+final_fit %>% 
+  vip(geom = "col", aesthetics = list(fill = "midnightblue", alpha = 0.8))+
+  scale_y_continuous(expand = c(0,0))
+
+```
+
+```{r}
+#visualize decision tree
+library(parttree)
+
+wind_train %>% 
+  ggplot(aes(rotor_diameter_m, commissioning_date))+
+  geom_parttree(data = final_fit, alpha = 0.3)
+  geom_jitter(alpha = 0.7, width = 1, height = 0.5, aes(color = turbine_capacity  ))+
+  scale_color_viridis_c(aesthetics = c("color","fill"))
+```
+
+```{r}
+#final evaluation
+collect_metrics(final_res)
+
+collect_predictions(final_res) %>% 
+  ggplot(aes(turbine_capacity, .pred))+
+  geom_abline(slope = 1, lty = 2, color = "gray50", alpha = 0.5 )+
+  geom_point(alpha = 0.6, color = "midnightblue")
+```
+
+
+
+
+
+
+
+
+
+

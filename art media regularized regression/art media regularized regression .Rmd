@@ -1,0 +1,176 @@
+train a regularized regression model with text features and then check model diagnostics like residuals
+
+```{r}
+library(tidytuesdayR)
+library(tidyverse)
+tt <- tt_load("2021-01-12")
+artwork <- tt$artwork
+head(artwork)
+
+```
+
+```{r}
+artwork %>% 
+  ggplot(aes(year))+
+  geom_histogram()
+
+tate_df <- artwork %>% 
+  filter(year > 1750) %>% 
+  select(year, medium) %>% 
+  na.omit() %>% 
+  arrange(year)
+```
+
+```{r}
+#tidytext
+library(tidytext)
+tate_df %>% 
+  unnest_tokens(word, medium) %>% 
+  count(word, sort = T) 
+```
+
+```{r}
+#model
+library(tidymodels)
+set.seed(321)
+tate_split <- initial_split(tate_df, strata = year) 
+tate_train <- training(tate_split)
+tate_test <- testing(tate_split)
+
+set.seed(312)
+tate_folds <- vfold_cv(tate_train, strata = year)
+
+```
+
+```{r}
+#recipe and preprocessing
+library(textrecipes)
+
+tate_rec <- recipe(year~medium , data = tate_train) %>% 
+  step_tokenize(medium) %>% 
+  step_stopwords(medium) %>% 
+  step_tokenfilter(medium, max_tokens = 500) %>%  #don't want to keep every single word (each is a feature)
+  step_tfidf(medium)
+
+```
+
+```{r}
+#model
+#added sparse data structures to tidymodels,for faster model fitting. To use the sparse data structure, create a hardhat blueprint with composition = "dgCMatrix".
+sparse_bp <- hardhat::default_recipe_blueprint(composition = "dgCMatrix")
+
+
+lasso_spec <- linear_reg(penalty = tune(),mixture = 1) %>%  #mixture = 1 is lasso and will bring terms to 0, so words that we don't want will be discarded
+  set_engine("glmnet")
+
+#workflow
+tate_wflow <- workflow() %>% 
+  add_model(lasso_spec) %>% 
+  add_recipe(tate_rec, blueprint = sparse_bp)
+```
+
+```{r}
+doParallel::registerDoParallel()
+#penalty tuning grid
+lambda_grid <- grid_regular(penalty(range = c(-3, 0)), levels = 20)
+
+set.seed(1234)
+
+lasso_rs <- tune_grid(
+  tate_wflow,
+  resamples = tate_folds,
+  grid = lambda_grid
+)
+
+lasso_rs
+
+
+```
+
+```{r}
+#evaluate 
+autoplot(lasso_rs)
+show_best(lasso_rs, "rmse")
+
+best_rmse <- select_best(lasso_rs, "rmse")
+```
+
+```{r}
+#finalize
+final_lasso <- finalize_workflow(tate_wflow, best_rmse)
+
+tate_final <- last_fit(final_lasso,tate_split)
+collect_metrics(tate_final)
+```
+
+```{r}
+#variable importance
+library(vip)
+tate_vip <- pull_workflow_fit(tate_final$.workflow[[1]]) %>%
+  vi()
+
+#positive is later art, negative is earlier art
+tate_vip %>%
+  group_by(Sign) %>%
+  slice_max(abs(Importance), n = 20) %>%
+  ungroup() %>%
+  mutate(
+    Variable = str_remove(Variable, "tfidf_medium_"),
+    Importance = abs(Importance),
+    Variable = fct_reorder(Variable, Importance),
+    Sign = if_else(Sign == "POS", "More in later art", "More in earlier art")
+  ) %>%
+  ggplot(aes(Importance, Variable, fill = Sign)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~Sign, scales = "free") +
+  labs(y = NULL)
+
+
+```
+
+```{r}
+#plot true and predicted values
+collect_predictions(tate_final) %>%
+  ggplot(aes(year, .pred)) +
+  geom_abline(lty = 2, color = "gray50", size = 1.2) +
+  geom_point(size = 1.5, alpha = 0.3, color = "midnightblue") +
+  coord_fixed()
+
+#close to line means predicted well
+```
+
+```{r}
+#look more into misclassifications around the 1900 line
+misclassified <- collect_predictions(tate_final) %>%
+  bind_cols(tate_test %>% select(medium)) %>%
+  filter(abs(year - .pred) > 100)
+
+misclassified %>%
+  arrange(year)
+
+#These are pieces of art that were created very early but predicted much later. In fact, notice that “Oil paint on canvas” also predicts to 1898; that is about the mean or median of this whole dataset, that was one of the most common media, and this is how a linear model works!
+
+```
+
+```{r}
+#get residuals
+augment(tate_final) %>%
+  ggplot(aes(.pred, .resid)) +
+  geom_hline(yintercept = 0, lty = 2, color = "gray50", size = 1.2) +
+  geom_point(size = 1.5, alpha = 0.3, color = "midnightblue") +
+  geom_smooth(color = "black")
+
+#This plot exhibits significant heteroscedasticity, with lower variance for recent artwork and higher variance for older artwork. If the model predicts a recent year, we can be more confident that it is right than if the model predicts an older year, and there is basically no time information in the fact that an artwork was created with a medium like oil on canvas. So is this model bad and not useful? I’d say it’s not great, for most goals I can think of, but it’s interesting to notice how much we can learn about our data even from such a model.
+```
+
+
+
+
+
+
+
+
+
+
+
+

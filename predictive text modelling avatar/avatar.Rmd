@@ -1,0 +1,240 @@
+```{r}
+library(tidyverse)
+library(tvthemes)
+theme_set(theme_avatar(title.size = 14))
+avatar_raw <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-08-11/avatar.csv")
+
+
+head(avatar_raw)
+View(avatar_raw)
+
+```
+
+```{r}
+
+avatar_raw %>% 
+  mutate(season_ep = paste0(book_num, ".", chapter_num))
+  ggplot(aes(imdb_rating))+
+  geom_histogram()
+
+avatar_raw %>% 
+  mutate(book_num = as.factor(book_num),
+         chapter_num = as.factor(chapter_num)) %>% 
+  ggplot(aes(chapter_num, imdb_rating, color = book_num))+
+  geom_point()+
+  geom_line(group = 1)
+```
+
+```{r}
+avatar_raw %>% 
+  count(character, sort = T)
+
+avatar_raw %>%
+  filter(!is.na(character_words)) %>% 
+  mutate(book = fct_inorder(book), 
+         character = fct_lump_n(character, 10)) %>% 
+  count(book, character, sort = T) %>% 
+  mutate(character = reorder_within(character, n, book)) %>% 
+  ggplot(aes(n, character, fill = book))+
+  geom_col()+
+  scale_y_reordered()+
+  facet_wrap(~book, scales = "free_y")
+         
+
+```
+
+```{r}
+#make df
+avatar_df <- avatar_raw %>% 
+  filter(!is.na(character_words)) %>% 
+    mutate(aang = if_else(character == "Aang", "Aang", "Other")) %>% 
+  select(aang, book, text=  character_words)
+```
+
+```{r}
+#tidytext format
+library(tidylo)
+avatar_log_odds <- avatar_df %>% 
+  unnest_tokens(word, text) %>% 
+  count(aang, word) %>% 
+  bind_log_odds(aang, word, n) %>% 
+  arrange(-log_odds_weighted)
+
+#plot by log odds
+avatar_log_odds %>% 
+  group_by(aang) %>% 
+  slice_max(log_odds_weighted,n=15) %>% 
+  ungroup() %>% 
+  mutate(word = fct_reorder(word, log_odds_weighted)) %>% 
+  ggplot(aes(log_odds_weighted, word, fill = aang))+
+  geom_col()+
+  scale_fill_avatar()+
+  facet_wrap(~aang, scales = "free")
+  
+```
+
+```{r}
+library(textfeatures)
+
+tf <- textfeatures(avatar_df, sentiment = F, word_dims = 0, normalize = F)
+
+tf %>% 
+  bind_cols(avatar_df) %>% 
+  group_by(aang) %>% 
+  summarise(across(starts_with("n_"), mean)) %>% 
+  pivot_longer(starts_with("n_"), names_to = "text_feature") %>% 
+  filter(value>0) %>% 
+  ungroup() %>% 
+    mutate(text_feature = fct_reorder(text_feature, value)) %>% 
+ggplot(aes(aang, value, fill = aang)) +
+  geom_col(position = "dodge", alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~text_feature, scales = "free", ncol = 6) +
+  scale_fill_avatar("AirNomads") +
+  labs(x = NULL, y = "Mean text features per spoken line")
+```
+
+```{r}
+#2 types of models
+library(tidymodels)
+set.seed(21)
+avatar_split <- initial_split(avatar_df, strata = aang)
+avatar_train <- training(avatar_split)
+avatar_test <- testing(avatar_split)
+
+train_folds <- vfold_cv(avatar_train, strata = aang, 10)
+
+```
+
+```{r}
+#recipe
+library(themis)
+library(textrecipes)
+
+avatar_rec <- recipe(aang~text, data = avatar_train) %>% 
+  step_downsample(aang) %>% 
+  step_textfeature(text) %>%  #does all the textcounting for features
+  step_zv(all_predictors()) %>% 
+  step_normalize(all_predictors())
+
+avatar_prep <- avatar_rec %>% prep()
+  
+```
+
+```{r}
+#spec
+rf_spec <- rand_forest(trees = 1000) %>%
+  set_engine("ranger") %>% 
+  set_mode("classification")
+  
+svm_spec <- svm_rbf(cost = 0.5) %>% 
+  set_engine("kernlab") %>% 
+  set_mode("classification")
+
+
+avatar_wflow <- workflow() %>% 
+  add_recipe(avatar_rec) 
+```
+
+
+```{r}
+#random forest
+doParallel::registerDoParallel()
+
+rf_res <- avatar_wflow %>% 
+  add_model(rf_spec) %>%
+  fit_resamples(
+    resamples = train_folds,
+    metrics = metric_set(roc_auc, accuracy),
+    control = control_grid(save_pred = TRUE)
+  )
+
+
+rf_res %>% collect_metrics()
+rf_res %>% conf_mat_resampled()
+```
+
+```{r}
+#support vector machine
+svm_res <- avatar_wflow %>% 
+  add_model(svm_spec) %>% 
+    fit_resamples(
+    resamples = train_folds,
+    metrics = metric_set(roc_auc, accuracy),
+    control = control_resamples(save_pred = T)
+  )
+
+svm_res %>% collect_metrics()
+svm_res %>% conf_mat_resampled()
+
+#svm is doing a better job at identifying aang speaking (the positive cases) at the expense of identifying others speak (negative cases)
+```
+
+```{r}
+#plot roc_auc for svm model
+svm_res %>% 
+  collect_predictions() %>% 
+  group_by(id) %>% 
+  roc_curve(aang, .pred_Aang) %>% 
+    ggplot(aes(1 - specificity, sensitivity, color = id)) +
+  geom_abline(lty = 2, color = "gray80", size = 1.5) +
+  geom_path(show.legend = FALSE, alpha = 0.6, size = 1.2) +
+  scale_color_avatar() +
+  coord_equal()
+```
+
+```{r}
+#variable importance
+library(vip)
+avatar_imp <- avatar_wflow %>% 
+  add_model(svm_spec) %>% 
+  fit(avatar_train) %>% 
+  pull_workflow_fit() %>% 
+    vi(
+    method = "permute", nsim = 10, #permute method to see what textfeatures lead to classifications
+    target = "aang", metric = "auc", reference_class = "Other",
+    pred_wrapper = kernlab::predict, train = juice(avatar_prep)
+  )
+
+
+ avatar_imp %>%
+  slice_max(Importance, n = 8) %>%
+  mutate(
+    Variable = str_remove(Variable, "textfeature_text_n_"),
+    Variable = fct_reorder(Variable, Importance)
+  ) %>%
+  ggplot(aes(Importance, Variable, color = Variable)) +
+  geom_errorbar(aes(xmin = Importance - StDev, xmax = Importance + StDev),
+    alpha = 0.5, size = 1.3
+  ) +
+  geom_point(size = 3) +
+  theme(legend.position = "none") +
+  scale_color_avatar() +
+  labs(y = NULL) 
+```
+
+
+```{r}
+#final test fit
+avatar_final <- avatar_wflow %>%
+  add_model(svm_spec) %>%
+  last_fit(avatar_split)
+
+avatar_final %>%
+  collect_metrics()
+
+avatar_final %>%
+  collect_predictions() %>%
+  conf_mat(aang, .pred_class)
+```
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,170 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+theme_set(theme_light())
+
+#data from planted tree locations around san francisco
+sf_trees <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-01-28/sf_trees.csv")
+```
+
+```{r}
+head(sf_trees)
+
+#use only if DPW maintained to predict on. any other legal status will be "other"
+#roughly extract plot size using first number found from entry
+trees_df <- sf_trees %>% 
+  mutate(legal_status = case_when(legal_status == "DPW Maintained" ~ legal_status,
+                   TRUE ~ "Other"),
+         plot_size = parse_number(plot_size)) %>% 
+  select(-address) %>% 
+  na.omit() %>% 
+  mutate_if(is.character, factor)
+```
+
+```{r}
+library(themis)
+trees_split <- initial_split(trees_df, prop = 0.8, strata = legal_status)
+trees_train <- training(trees_split)
+trees_test <- testing(trees_split)
+
+
+trees_fold <- vfold_cv(trees_train, 10, strata = legal_status)
+
+
+#recipe
+trees_rec <- recipe(legal_status~., data = trees_train) %>% 
+  update_role(tree_id, new_role = "ID") %>% 
+  step_other(species, caretaker, threshold = 0.01) %>% 
+  step_other(site_info, threshold = 0.005) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_date(date, features = c("year"))%>% 
+  step_rm(date) %>% 
+  step_downsample(legal_status)
+  
+trees_rec %>% prep() %>% juice()
+```
+
+```{r}
+#spec
+trees_spec <- rand_forest(
+  min_n = tune(),
+  mtry = tune(),
+  trees = 1000) %>% 
+  set_engine("ranger") %>% 
+  set_mode("classification")
+```
+
+```{r}
+trees_wflow <- workflow() %>% 
+  add_recipe(trees_rec) %>% 
+  add_model(trees_spec)
+```
+
+```{r}
+#tune hyperparameters
+
+tune_res <- tune_grid(
+  trees_wflow,
+  resamples = trees_fold,
+  grid = 20
+)
+
+
+tune_res %>% collect_metrics()
+tune_res %>% select_best(metric = "roc_auc")
+
+```
+
+```{r}
+#visualize tuned results
+tune_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == "roc_auc") %>% 
+  select(mean, min_n, mtry) %>% 
+  pivot_longer(min_n:mtry,
+               names_to = "metric", 
+               values_to = "value") %>% 
+  ggplot(aes(value, mean, color = metric))+
+    geom_line(size = 1.5)+
+  facet_wrap(~metric)
+```
+
+```{r}
+#create new grid for retuning. now we input range for tuning
+rf_grid <- grid_regular(
+  mtry(range = c(10,40)),
+  min_n(range = c(2,10)),
+  levels = 5
+)
+
+tune_res <- tune_grid(
+  trees_wflow, 
+  resamples = trees_fold,
+  grid = rf_grid
+)
+
+tune_res %>% 
+  collect_metrics() %>% 
+  filter(.metric = "roc_auc") %>% 
+  mutate(min_n = factor(min_n)) %>% 
+  ggplot(aes(mtry, mean, color = min_n))+
+  geom_point()+
+  geom_line(alpha = 0.5, size = 1.5)
+```
+
+```{r}
+#take best hyperparameters. finalize model
+best_auc <- select_best(tune_res, "roc_auc")
+
+final_rf <- finalize_model(
+  trees_spec,
+  best_auc
+)
+```
+
+```{r}
+#vip plot
+library(vip)
+
+final_rf %>% 
+  set_engine("ranger", importance = "permutation") %>%
+  fit(legal_status~., 
+      juice(trees_rec) %>% 
+        select(-tree_id)) %>% 
+  vip(geom = "point")
+```
+
+```{r}
+#fit on test set
+final_wflow <- workflow() %>% 
+  add_recipe(trees_rec) %>% 
+  add_model(final_rf)
+
+final_res <- final_wflow %>% 
+  last_fit(trees_split)
+
+final_res %>% collect_metrics()
+```
+
+```{r}
+final_res %>% collect_predictions() %>% 
+  mutate(correct= case_when(legal_status == .pred_class ~ "Correct",
+                            TRUE ~ "Incorrect")) %>% 
+  bind_cols(trees_test) %>% 
+   ggplot(aes(longitude, latitude, color = correct)) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  labs(color = NULL) +
+  scale_color_manual(values = c("gray80", "darkred"))
+```
+
+
+
+
+
+
+
+
+
+
+
+

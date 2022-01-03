@@ -1,0 +1,102 @@
+```{r}
+library(tidytuesdayR)
+library(tidyverse)
+
+
+tt <- tt_load("2021-03-23")
+unvotes <- tt$unvotes
+issues <- tt$issues
+
+head(unvotes)
+head(issues)
+
+```
+
+```{r}
+#200 countries and how they voted 6203 times
+#replace NA with abstain
+unvotes_df<- unvotes %>% 
+  select(country, rcid, vote) %>% 
+  mutate(vote = factor(vote, levels = c("no","abstain","yes")),
+         vote = as.numeric(vote),
+         rcid = paste0("rcid_", rcid))  %>% 
+  pivot_wider(names_from = "rcid", values_from = "vote", values_fill = 2) 
+
+
+```
+
+
+```{r}
+#PCA
+
+library(tidymodels)
+pca_rec <- recipe(~., data = unvotes_df) %>% 
+  update_role(country, new_role = "id") %>% 
+  step_normalize(all_predictors()) %>% 
+  step_pca(all_predictors())
+
+
+pca_prep <- prep(pca_rec)
+pca_prep
+
+bake(pca_prep, new_data = NULL) %>% 
+  ggplot(aes(PC1, PC2, label = country))+
+    geom_point(color = "midnightblue", alpha = 0.7, size = 2) +
+  geom_text(check_overlap = TRUE, hjust = "inward") +
+  labs(color = NULL)
+```
+
+```{r}
+#tidy the pca prep
+#get issues associated with the top terms
+#We can look at which votes contribute to the component by tidying the prepped recipe. Let’s join the roll call votes up with the topics to see which topics contribute to the top principal components.
+
+pca_comps <- tidy(pca_prep,2) %>%  #1 gets you means, 2 gets you principal components
+  filter(component %in% paste0("PC", 1:4)) %>% 
+  left_join(issues %>%  mutate(terms = paste0("rcid_", rcid))) %>% 
+  filter(!is.na(issue)) %>% 
+  group_by(component) %>% 
+  slice_max(abs(value), n = 8) %>% 
+  ungroup()
+  
+pca_comps %>% 
+  mutate(value = abs(value)) %>%
+  ggplot(aes(value, fct_reorder(terms, value), fill = issue))+
+  geom_col(position = "dodge")+
+  facet_wrap(~component,scales = "free_y")+
+    labs(
+    x = "Absolute value of contribution",
+    y = NULL, fill = NULL,
+    title = "What issues are most important in UN voting country differences?",
+    subtitle = "Human rights and economic development votes account for the most variation"
+  )
+
+#pc1 focuses on human rights and economic development. this accounts for the biggest variation in countries (where they fall on the spectrum with their votes)
+#pc2 mainly colonialism. accounts for second most variation in countries 
+```
+
+
+```{r}
+#UMAP
+library(embed)
+
+umap_rec <- recipe(~., data = unvotes_df) %>%
+  update_role(country, new_role = "id") %>%
+  step_normalize(all_predictors()) %>%
+  step_umap(all_predictors())
+
+umap_prep <- prep(umap_rec)
+
+umap_prep
+
+bake(umap_prep, new_data = NULL) %>%
+  ggplot(aes(umap_1, umap_2, label = country)) +
+  geom_point(color = "midnightblue", alpha = 0.7, size = 2) +
+  geom_text(check_overlap = TRUE, hjust = "inward", family = "IBMPlexSans") +
+  labs(color = NULL)
+```
+
+
+
+
+
